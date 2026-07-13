@@ -1,0 +1,24 @@
+# Render Blueprint for BIM Data Execution
+# One free web service + a persistent disk so the master DB survives restarts.
+services:
+  - type: web
+    name: bim-data-execution
+    runtime: python
+    plan: free                      # free instance (sleeps when idle; see DEPLOY.md)
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 8 --timeout 0
+    envVars:
+      - key: SEAMLESS_API_KEY       # set this in the Render dashboard (secret)
+        sync: false
+      - key: APP_PASSWORD           # shared team password (set in dashboard)
+        sync: false
+      - key: APP_SECRET             # random session secret
+        generateValue: true
+      - key: DATA_DIR
+        value: /var/data            # where uploads/outputs live
+      - key: MASTER_DB_PATH
+        value: /var/data/bim_master.db
+    disk:
+      name: bim-data
+      mountPath: /var/data          # persistent disk keeps the master DB (paid tiers only)
+      sizeGB: 1
