@@ -97,6 +97,14 @@ def run_job(job_id, input_path, api_key, cfg):
     update(status="running", total=len(companies), current=0,
            found=0, nomatch=0, skipped=0, errors=0, contacts=0, preview=preview)
     mode = "PREVIEW (free, no credits)" if preview else "RUN (uses credits)"
+
+    # Save the uploaded INPUT to the shared Drive folder (if Drive is configured)
+    if core.drive_enabled():
+        import datetime as _dt
+        stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M")
+        link = core.drive_upload(input_path, drive_name=f"INPUT_{stamp}_{os.path.basename(input_path)}")
+        if link:
+            add_log(f"Input file saved to shared Drive: {link}")
     add_log(f"{mode}. {len(companies)} companies, up to {cfg['max_contacts']} contacts each, "
             f"{cfg['workers']} at a time.")
 
@@ -150,7 +158,18 @@ def run_job(job_id, input_path, api_key, cfg):
     for c in companies:
         ordered.extend(results_by_company.get(c, []))
     core.write_xlsx(ordered, out_path)
-    update(status="done", output=out_path, company="")
+
+    # Save the OUTPUT to the shared Drive folder (if Drive is configured)
+    drive_link = None
+    if core.drive_enabled():
+        import datetime as _dt
+        stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M")
+        tag = "PREVIEW" if preview else "RESULTS"
+        drive_link = core.drive_upload(out_path, drive_name=f"{tag}_{stamp}.xlsx")
+        if drive_link:
+            add_log(f"Output saved to shared Drive: {drive_link}")
+
+    update(status="done", output=out_path, company="", drive_link=drive_link)
     if preview:
         add_log(f"Preview complete. ~{counters['contacts']} contacts would be researched "
                 f"(est. ~{counters['contacts']} credits) across {counters['found']} companies. "
@@ -242,7 +261,7 @@ def upload():
 
     with JOBS_LOCK:
         JOBS[job_id] = {"status": "queued", "total": 0, "current": 0, "company": "",
-                        "found": 0, "nomatch": 0, "skipped": 0, "errors": 0, "contacts": 0, "cached": 0, "preview": False,
+                        "found": 0, "nomatch": 0, "skipped": 0, "errors": 0, "contacts": 0, "cached": 0, "preview": False, "drive_link": None,
                         "log": [], "output": None, "error": None}
 
     threading.Thread(target=run_job, args=(job_id, saved, api_key, cfg), daemon=True).start()
@@ -281,6 +300,7 @@ def status(job_id):
             "skipped": job["skipped"], "errors": job["errors"], "contacts": job["contacts"], "cached": job["cached"], "preview": job["preview"],
             "log": job["log"][-250:],
             "download": f"/download/{job_id}" if job["status"] == "done" else None,
+            "drive_link": job.get("drive_link"),
         })
 
 
@@ -631,9 +651,12 @@ PAGE = r"""<!doctype html>
       else if(s.status==='done'){
         stage.textContent=s.preview?'Preview complete':'Complete'; bar.style.width='100%';
         dl.href=s.download;
-        doneBox.querySelector('span').textContent = s.preview
+        var baseMsg = s.preview
           ? ('Estimated cost: ~'+(s.contacts||0)+' credits for '+(s.contacts||0)+' contacts. Nothing spent - Run when ready.')
           : 'Your contacts file is ready.';
+        if(s.drive_link){ baseMsg += '  Also saved to the shared Drive.'; }
+        doneBox.querySelector('span').innerHTML = baseMsg +
+          (s.drive_link ? ' <a href="'+s.drive_link+'" target="_blank" style="color:#0a7686">Open in Drive</a>' : '');
         dl.textContent = s.preview ? 'Download preview' : 'Download Excel';
         doneBox.classList.add('show'); return;
       }

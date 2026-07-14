@@ -14,6 +14,14 @@ services:
         sync: false
       - key: APP_SECRET             # random session secret
         generateValue: true
+      - key: GDRIVE_CLIENT_ID       # Google Drive: OAuth client id
+        sync: false
+      - key: GDRIVE_CLIENT_SECRET   # Google Drive: OAuth client secret
+        sync: false
+      - key: GDRIVE_REFRESH_TOKEN   # Google Drive: refresh token from get_drive_token.py
+        sync: false
+      - key: GDRIVE_FOLDER_ID       # Google Drive: target folder id
+        sync: false
       - key: DATA_DIR
         value: /var/data            # where uploads/outputs live
       - key: MASTER_DB_PATH

@@ -573,6 +573,58 @@ def write_xlsx(rows, path):
     wb.save(path)
 
 
+# ============================================================================
+# GOOGLE DRIVE upload (optional). Enabled when these env vars are set:
+#   GDRIVE_CLIENT_ID, GDRIVE_CLIENT_SECRET, GDRIVE_REFRESH_TOKEN, GDRIVE_FOLDER_ID
+# Uploads a local file into the shared Drive folder. Uses only the refresh token
+# (no browser needed on the server). Fails soft: never breaks a run.
+# ============================================================================
+GDRIVE_TOKEN_URI = "https://oauth2.googleapis.com/token"
+GDRIVE_UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true"
+
+def drive_enabled():
+    return all(os.environ.get(k) for k in
+               ("GDRIVE_CLIENT_ID", "GDRIVE_CLIENT_SECRET", "GDRIVE_REFRESH_TOKEN", "GDRIVE_FOLDER_ID"))
+
+def _drive_access_token():
+    r = requests.post(GDRIVE_TOKEN_URI, data={
+        "client_id": os.environ["GDRIVE_CLIENT_ID"],
+        "client_secret": os.environ["GDRIVE_CLIENT_SECRET"],
+        "refresh_token": os.environ["GDRIVE_REFRESH_TOKEN"],
+        "grant_type": "refresh_token",
+    }, timeout=30)
+    r.raise_for_status()
+    return r.json()["access_token"]
+
+def drive_upload(local_path, drive_name=None, mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"):
+    """Upload a file to the configured Drive folder. Returns the Drive file link, or None."""
+    if not drive_enabled():
+        return None
+    try:
+        token = _drive_access_token()
+        meta = {"name": drive_name or os.path.basename(local_path),
+                "parents": [os.environ["GDRIVE_FOLDER_ID"]]}
+        with open(local_path, "rb") as f:
+            data = f.read()
+        boundary = "----bimboundary7hf83n"
+        body = (
+            (f"--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n"
+             f"{json.dumps(meta)}\r\n").encode()
+            + f"--{boundary}\r\nContent-Type: {mime}\r\n\r\n".encode()
+            + data + f"\r\n--{boundary}--".encode()
+        )
+        r = requests.post(GDRIVE_UPLOAD_URL, headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": f"multipart/related; boundary={boundary}",
+        }, data=body, timeout=120)
+        r.raise_for_status()
+        fid = r.json().get("id")
+        return f"https://drive.google.com/file/d/{fid}/view" if fid else None
+    except Exception as e:
+        log(f"      [drive] upload failed: {e}")
+        return None
+
+
 def main():
     ap = argparse.ArgumentParser(description="BIM Data Execution - all hierarchy contacts per company")
     ap.add_argument("--input", required=True); ap.add_argument("--output", default="results.xlsx")
