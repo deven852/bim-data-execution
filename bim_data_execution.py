@@ -778,6 +778,8 @@ def _drive_list_inputs(token):
         low = nm.lower()
         if nm.startswith(DONE_PREFIX) or nm.startswith(SKIP_PREFIX):
             continue
+        if low.startswith(UNIVERSAL_INPUT_BASE.lower()):
+            continue  # the permanent universal input is handled by scan_universal_once
         if low.endswith(".csv") or low.endswith(".xlsx") or low.endswith(".xlsm") or low.endswith(".tsv"):
             out.append(f)
     return out
@@ -873,6 +875,184 @@ def scan_input_folder_once(api_key, logfn=None, max_contacts=None):
         except Exception as e:
             (logfn or log)(f"[auto] {fmeta.get('name')}: ERROR {e}")
     return results
+
+
+# ---------------------------------------------------------------------------
+# UNIVERSAL INPUT/OUTPUT FILES: one permanent input file the team pastes
+# companies into, one permanent output file that accumulates results.
+#   - Input:  a file named "BIM_UNIVERSAL_INPUT..." in the Input folder
+#             (auto-created as .xlsx with a "Company" header if missing).
+#   - Quiet timer: only processed after the file has been UNCHANGED for
+#     UNIVERSAL_QUIET_SECONDS (default 180s) so half-pasted lists aren't run.
+#   - Only NEW companies (not in the output's Processed sheet) are processed.
+#   - Output: "BIM_UNIVERSAL_OUTPUT.xlsx" in the Output folder, appended forever.
+# ---------------------------------------------------------------------------
+UNIVERSAL_INPUT_BASE = "BIM_UNIVERSAL_INPUT"
+UNIVERSAL_OUTPUT_NAME = "BIM_UNIVERSAL_OUTPUT.xlsx"
+UNIVERSAL_QUIET_SECONDS = int(os.environ.get("UNIVERSAL_QUIET_SECONDS", "180"))
+GSHEET_MIME = "application/vnd.google-apps.spreadsheet"
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+def _drive_find_by_prefix(token, folder_id, prefix):
+    q = f"'{folder_id}' in parents and trashed=false"
+    r = requests.get(GDRIVE_FILES_URL, headers={"Authorization": f"Bearer {token}"},
+                     params={"q": q, "fields": "files(id,name,mimeType,modifiedTime)",
+                             "supportsAllDrives": "true", "includeItemsFromAllDrives": "true"},
+                     timeout=30)
+    r.raise_for_status()
+    for f in r.json().get("files", []):
+        if f.get("name", "").lower().startswith(prefix.lower()):
+            return f
+    return None
+
+def _parse_drive_time(s):
+    # e.g. 2026-07-15T16:00:00.000Z
+    from datetime import datetime, timezone
+    try:
+        return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0
+
+def _universal_ensure_input(token, logfn=None):
+    """Find the universal input file; create an empty template if missing."""
+    f = _drive_find_by_prefix(token, os.environ["GDRIVE_INPUT_FOLDER"], UNIVERSAL_INPUT_BASE)
+    if f:
+        return f
+    tmp = os.path.join(os.path.dirname(MASTER_DB), "_universal_tpl.xlsx")
+    wb = Workbook(); ws = wb.active; ws.title = "Companies"; ws.append(["Company"])
+    wb.save(tmp)
+    fid = _drive_upload_to(token, os.environ["GDRIVE_INPUT_FOLDER"], tmp,
+                           UNIVERSAL_INPUT_BASE + ".xlsx", XLSX_MIME)
+    try: os.remove(tmp)
+    except Exception: pass
+    (logfn or log)(f"[universal] Created '{UNIVERSAL_INPUT_BASE}.xlsx' in the Input folder - "
+                   "open it and add company names under the 'Company' column.")
+    return {"id": fid, "name": UNIVERSAL_INPUT_BASE + ".xlsx", "mimeType": XLSX_MIME,
+            "modifiedTime": "1970-01-01T00:00:00Z"}
+
+def _universal_read_companies(token, f):
+    """Read company names from the universal input (Google Sheet or Excel/CSV)."""
+    workdir = os.path.dirname(MASTER_DB)
+    if f.get("mimeType") == GSHEET_MIME:
+        # native Google Sheet -> export as CSV
+        r = requests.get(f"{GDRIVE_FILES_URL}/{f['id']}/export",
+                         headers={"Authorization": f"Bearer {token}"},
+                         params={"mimeType": "text/csv"}, timeout=60)
+        r.raise_for_status()
+        tmp = os.path.join(workdir, "_universal_in.csv")
+        with open(tmp, "wb") as fh: fh.write(r.content)
+    else:
+        ext = ".csv" if f.get("name", "").lower().endswith(".csv") else ".xlsx"
+        tmp = os.path.join(workdir, "_universal_in" + ext)
+        _drive_download(token, f["id"], tmp)
+    try:
+        return load_companies(tmp)
+    finally:
+        try: os.remove(tmp)
+        except Exception: pass
+
+def _universal_load_output(token):
+    """Return (fileId or None, existing rows, processed-company set) from the universal output."""
+    f = _drive_find_by_prefix(token, os.environ["GDRIVE_OUTPUT_FOLDER"], UNIVERSAL_OUTPUT_NAME)
+    if not f:
+        return None, [], set()
+    workdir = os.path.dirname(MASTER_DB)
+    tmp = os.path.join(workdir, "_universal_out.xlsx")
+    _drive_download(token, f["id"], tmp)
+    rows, processed = [], set()
+    try:
+        wb = load_workbook(tmp, read_only=True, data_only=True)
+        ws = wb["Contacts"] if "Contacts" in wb.sheetnames else wb.active
+        data = list(ws.iter_rows(values_only=True))
+        if data:
+            hdr = [str(h) if h else "" for h in data[0]]
+            for r in data[1:]:
+                if any(v not in (None, "") for v in r):
+                    rows.append({hdr[i]: (r[i] if i < len(r) else "") for i in range(len(hdr))})
+        if "Processed" in wb.sheetnames:
+            for r in wb["Processed"].iter_rows(values_only=True):
+                if r and r[0]:
+                    processed.add(_norm(str(r[0])))
+    finally:
+        try: os.remove(tmp)
+        except Exception: pass
+    return f["id"], rows, processed
+
+def _universal_write_output(token, fid, rows, processed):
+    """Write the universal output workbook (Contacts + Processed sheets) to Drive."""
+    workdir = os.path.dirname(MASTER_DB)
+    tmp = os.path.join(workdir, "_universal_out_w.xlsx")
+    wb = Workbook()
+    ws = wb.active; ws.title = "Contacts"; ws.append(OUTPUT_COLUMNS)
+    for row in rows:
+        ws.append([row.get(k, "") for k in OUTPUT_COLUMNS])
+    ps = wb.create_sheet("Processed")
+    for name in sorted(processed):
+        ps.append([name])
+    wb.save(tmp)
+    try:
+        if fid:
+            r = requests.patch(GDRIVE_UPDATE_URL.format(fid=fid),
+                               headers={"Authorization": f"Bearer {token}", "Content-Type": XLSX_MIME},
+                               data=open(tmp, "rb").read(), timeout=120)
+            r.raise_for_status()
+        else:
+            fid = _drive_upload_to(token, os.environ["GDRIVE_OUTPUT_FOLDER"], tmp,
+                                   UNIVERSAL_OUTPUT_NAME, XLSX_MIME)
+    finally:
+        try: os.remove(tmp)
+        except Exception: pass
+    return fid
+
+def scan_universal_once(api_key, logfn=None, max_contacts=None):
+    """Check the universal input file. If it changed and has been quiet long enough,
+    process only the NEW companies and append them to the universal output."""
+    def say(m): (logfn or log)(m)
+    if not watch_enabled():
+        return []
+    token = _drive_access_token()
+    f = _universal_ensure_input(token, logfn=logfn)
+
+    # QUIET TIMER: skip if the file was edited too recently (someone may still be typing)
+    age = time.time() - _parse_drive_time(f.get("modifiedTime", ""))
+    if age < UNIVERSAL_QUIET_SECONDS:
+        say(f"[universal] input edited {int(age)}s ago - waiting for it to be quiet "
+            f"({UNIVERSAL_QUIET_SECONDS}s) before processing.")
+        return []
+
+    try:
+        companies = _universal_read_companies(token, f)
+    except Exception as e:
+        say(f"[universal] could not read input file: {e}")
+        return []
+
+    fid, rows, processed = _universal_load_output(token)
+    new = [c for c in companies if _norm(c) not in processed]
+    if not new:
+        return []
+    capped = len(new) > AUTO_MAX_COMPANIES
+    new = new[:AUTO_MAX_COMPANIES]
+    say(f"[universal] {len(new)} new company(ies) detected" + (" (CAPPED)" if capped else "") + ".")
+
+    sync_master_before_run()
+    headers = auth_headers(api_key)
+    done = 0
+    for company in new:
+        try:
+            crows, kind = process_company(company, headers,
+                                          max_contacts=max_contacts or MAX_CONTACTS_PER_COMPANY)
+        except Exception as e:
+            crows, kind = [note_row(company, f"ERROR: {e}")], "error"
+        rows.extend(crows)
+        processed.add(_norm(company))
+        done += 1
+        say(f"[universal] {done}/{len(new)} {company}"
+            + (" (from master, free)" if kind == "cached" else ""))
+
+    fid = _universal_write_output(token, fid, rows, processed)
+    sync_master_after_run()
+    say(f"[universal] DONE - {done} company(ies) added to {UNIVERSAL_OUTPUT_NAME}.")
+    return [{"new_companies": done, "output": UNIVERSAL_OUTPUT_NAME, "capped": capped}]
 
 
 def diagnose():

@@ -82,7 +82,8 @@ def run_scan(reason="timer"):
     try:
         _LAST_SCAN[0] = time.time()
         found = core.scan_input_folder_once(api_key, logfn=_watch_log)
-        if not found:
+        found2 = core.scan_universal_once(api_key, logfn=_watch_log)
+        if not found and not found2:
             _watch_log(f"[auto] checked Input folder ({reason}) - nothing new.")
     except Exception as e:
         _watch_log(f"[auto] scan error ({reason}): {e}")
