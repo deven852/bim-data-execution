@@ -57,10 +57,13 @@ def login_required(fn):
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 
-# ---- Watched-folder background worker ----
+# ---- Watched-folder worker (ping-driven + self-healing timer) ----
 WATCH_LOG = []
 WATCH_LOCK = threading.Lock()
 WATCH_INTERVAL = int(os.environ.get("WATCH_INTERVAL_SECONDS", "60"))
+_SCAN_LOCK = threading.Lock()     # prevents two scans overlapping
+_LAST_SCAN = [0.0]                # timestamp of last scan start
+_WATCHER_THREAD = [None]
 
 def _watch_log(msg):
     with WATCH_LOCK:
@@ -68,24 +71,42 @@ def _watch_log(msg):
         del WATCH_LOG[:-200]
     print(msg, flush=True)
 
-def _watcher_loop():
+def run_scan(reason="timer"):
+    """Do one scan of the Input folder. Guarded so scans never overlap. Safe to call
+    from the timer thread OR from the /ping and /scan-now endpoints."""
     api_key = os.environ.get("SEAMLESS_API_KEY", "")
     if not (core.watch_enabled() and api_key):
         return
+    if not _SCAN_LOCK.acquire(blocking=False):
+        return  # a scan is already running; skip
+    try:
+        _LAST_SCAN[0] = time.time()
+        found = core.scan_input_folder_once(api_key, logfn=_watch_log)
+        if not found:
+            _watch_log(f"[auto] checked Input folder ({reason}) - nothing new.")
+    except Exception as e:
+        _watch_log(f"[auto] scan error ({reason}): {e}")
+    finally:
+        _SCAN_LOCK.release()
+
+def _watcher_loop():
     _watch_log(f"[auto] Watcher started. Checking Input folder every {WATCH_INTERVAL}s.")
     while True:
-        try:
-            core.scan_input_folder_once(api_key, logfn=_watch_log)
-        except Exception as e:
-            _watch_log(f"[auto] watcher error: {e}")
+        run_scan(reason="timer")
         time.sleep(WATCH_INTERVAL)
 
-def start_watcher():
-    if core.watch_enabled() and os.environ.get("SEAMLESS_API_KEY"):
-        t = threading.Thread(target=_watcher_loop, daemon=True)
-        t.start()
+def ensure_watcher():
+    """Start the timer thread if it isn't alive. Called at boot AND on every /ping,
+    so even if Gunicorn recycles the worker and kills the thread, the next ping revives it."""
+    if not (core.watch_enabled() and os.environ.get("SEAMLESS_API_KEY")):
+        return
+    t = _WATCHER_THREAD[0]
+    if t is None or not t.is_alive():
+        nt = threading.Thread(target=_watcher_loop, daemon=True)
+        nt.start()
+        _WATCHER_THREAD[0] = nt
 
-start_watcher()
+ensure_watcher()
 
 
 def classify(row):
@@ -236,27 +257,41 @@ font-size:14px;cursor:pointer}.err{color:#c0392b;font-size:13px;margin-top:10px}
 <button type="submit">Sign in</button>
 {% if error %}<div class="err">{{ error }}</div>{% endif %}</form></body></html>"""
 
+@app.route("/diag")
+@login_required
+def diag():
+    try:
+        return jsonify(core.diagnose())
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+
 @app.route("/ping")
 def ping():
-    # public, tiny endpoint a free cron pinger hits to keep the app awake
-    return jsonify(ok=True, watching=core.watch_enabled(), ts=int(time.time()))
+    # public endpoint the free cron pinger hits. Besides keeping the app awake, it
+    # revives the watcher thread if Gunicorn recycled it, and kicks off a scan in the
+    # background - so processing happens even if the long-lived thread died.
+    ensure_watcher()
+    if core.watch_enabled() and os.environ.get("SEAMLESS_API_KEY"):
+        threading.Thread(target=lambda: run_scan(reason="ping"), daemon=True).start()
+    return jsonify(ok=True, watching=core.watch_enabled(),
+                   last_scan=int(_LAST_SCAN[0]), ts=int(time.time()))
 
 @app.route("/watch-status")
 @login_required
 def watch_status():
+    ensure_watcher()
     with WATCH_LOCK:
         return jsonify(enabled=core.watch_enabled(), interval=WATCH_INTERVAL,
-                       cap=core.AUTO_MAX_COMPANIES, log=WATCH_LOG[-80:])
+                       cap=core.AUTO_MAX_COMPANIES, last_scan=int(_LAST_SCAN[0]),
+                       log=WATCH_LOG[-80:])
 
 @app.route("/scan-now", methods=["POST"])
 @login_required
 def scan_now():
     # manual trigger to process the input folder immediately (doesn't wait for the timer)
-    api_key = os.environ.get("SEAMLESS_API_KEY", "")
-    if not (core.watch_enabled() and api_key):
+    if not (core.watch_enabled() and os.environ.get("SEAMLESS_API_KEY")):
         return jsonify(error="Watcher not configured."), 400
-    threading.Thread(target=lambda: core.scan_input_folder_once(api_key, logfn=_watch_log),
-                     daemon=True).start()
+    threading.Thread(target=lambda: run_scan(reason="manual"), daemon=True).start()
     return jsonify(ok=True)
 
 @app.route("/login", methods=["GET", "POST"])

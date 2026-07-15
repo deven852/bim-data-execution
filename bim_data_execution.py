@@ -875,6 +875,62 @@ def scan_input_folder_once(api_key, logfn=None, max_contacts=None):
     return results
 
 
+def diagnose():
+    """Plain-English check of the watched-folder setup. Returns a dict of findings."""
+    out = {"checks": []}
+    def add(ok, msg): out["checks"].append(("OK" if ok else "PROBLEM") + ": " + msg)
+    if not drive_enabled():
+        add(False, "Google Drive credentials are not all set on the server.")
+        return out
+    add(True, "Drive credentials are present.")
+    try:
+        token = _drive_access_token()
+        add(True, "Drive login (refresh token) works.")
+    except Exception as e:
+        add(False, f"Drive login FAILED: {e}. The refresh token may be expired - re-run get_drive_token.py.")
+        return out
+    if not (os.environ.get("GDRIVE_INPUT_FOLDER") and os.environ.get("GDRIVE_OUTPUT_FOLDER")):
+        add(False, "Input/Output folder IDs are not set on the server.")
+        return out
+    add(True, "Input/Output folder IDs are set.")
+    # what does the automation account see in the input folder?
+    try:
+        folder = os.environ["GDRIVE_INPUT_FOLDER"]
+        r = requests.get(GDRIVE_FILES_URL, headers={"Authorization": f"Bearer {token}"},
+                         params={"q": f"'{folder}' in parents and trashed=false",
+                                 "fields": "files(id,name,mimeType,owners(emailAddress))",
+                                 "supportsAllDrives": "true", "includeItemsFromAllDrives": "true"},
+                         timeout=30)
+        r.raise_for_status()
+        files = r.json().get("files", [])
+        out["input_folder_id"] = folder
+        out["files_visible_to_app"] = [
+            {"name": f.get("name"), "owner": (f.get("owners", [{}])[0].get("emailAddress", "?"))}
+            for f in files]
+        if files:
+            add(True, f"App can SEE {len(files)} file(s) in the Input folder.")
+            proc = [f for f in files if not f["name"].startswith(DONE_PREFIX)]
+            add(True, f"{len(proc)} of them are unprocessed and would be picked up.")
+        else:
+            add(False, "App sees ZERO files in the Input folder. Likely cause: the file was "
+                       "uploaded by a DIFFERENT Google account, so this app (drive.file scope) "
+                       "can't see it. Fix: broaden the scope, or have files created by the app's account.")
+    except Exception as e:
+        add(False, f"Could not list the Input folder: {e}")
+    # can we write to output?
+    try:
+        tmp = os.path.join(os.path.dirname(MASTER_DB), "_diag.xlsx")
+        wb = Workbook(); wb.active.append(["diag"]); wb.save(tmp)
+        fid = _drive_upload_to(token, os.environ["GDRIVE_OUTPUT_FOLDER"], tmp, "_connection_test.xlsx",
+                               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        try: os.remove(tmp)
+        except Exception: pass
+        add(bool(fid), "Wrote a test file to the Output folder (delete '_connection_test.xlsx' later).")
+    except Exception as e:
+        add(False, f"Could NOT write to the Output folder: {e}")
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description="BIM Data Execution - all hierarchy contacts per company")
     ap.add_argument("--input", required=True); ap.add_argument("--output", default="results.xlsx")
