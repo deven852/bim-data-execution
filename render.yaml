@@ -20,8 +20,14 @@ services:
         sync: false
       - key: GDRIVE_REFRESH_TOKEN   # Google Drive: refresh token from get_drive_token.py
         sync: false
-      - key: GDRIVE_FOLDER_ID       # Google Drive: target folder id
+      - key: GDRIVE_FOLDER_ID       # Google Drive: target folder id (results + master)
         sync: false
+      - key: GDRIVE_INPUT_FOLDER    # Watched folder: drop files here to auto-process
+        sync: false
+      - key: GDRIVE_OUTPUT_FOLDER   # Watched folder: results appear here
+        sync: false
+      - key: AUTO_MAX_COMPANIES     # safety cap on auto-processed files
+        value: "50"
       - key: DATA_DIR
         value: /var/data            # where uploads/outputs live
       - key: MASTER_DB_PATH

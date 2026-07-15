@@ -57,6 +57,36 @@ def login_required(fn):
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 
+# ---- Watched-folder background worker ----
+WATCH_LOG = []
+WATCH_LOCK = threading.Lock()
+WATCH_INTERVAL = int(os.environ.get("WATCH_INTERVAL_SECONDS", "60"))
+
+def _watch_log(msg):
+    with WATCH_LOCK:
+        WATCH_LOG.append(msg)
+        del WATCH_LOG[:-200]
+    print(msg, flush=True)
+
+def _watcher_loop():
+    api_key = os.environ.get("SEAMLESS_API_KEY", "")
+    if not (core.watch_enabled() and api_key):
+        return
+    _watch_log(f"[auto] Watcher started. Checking Input folder every {WATCH_INTERVAL}s.")
+    while True:
+        try:
+            core.scan_input_folder_once(api_key, logfn=_watch_log)
+        except Exception as e:
+            _watch_log(f"[auto] watcher error: {e}")
+        time.sleep(WATCH_INTERVAL)
+
+def start_watcher():
+    if core.watch_enabled() and os.environ.get("SEAMLESS_API_KEY"):
+        t = threading.Thread(target=_watcher_loop, daemon=True)
+        t.start()
+
+start_watcher()
+
 
 def classify(row):
     note = (row.get("Note") or "")
@@ -205,6 +235,29 @@ font-size:14px;cursor:pointer}.err{color:#c0392b;font-size:13px;margin-top:10px}
 <input type="password" name="password" placeholder="Team password" autofocus>
 <button type="submit">Sign in</button>
 {% if error %}<div class="err">{{ error }}</div>{% endif %}</form></body></html>"""
+
+@app.route("/ping")
+def ping():
+    # public, tiny endpoint a free cron pinger hits to keep the app awake
+    return jsonify(ok=True, watching=core.watch_enabled(), ts=int(time.time()))
+
+@app.route("/watch-status")
+@login_required
+def watch_status():
+    with WATCH_LOCK:
+        return jsonify(enabled=core.watch_enabled(), interval=WATCH_INTERVAL,
+                       cap=core.AUTO_MAX_COMPANIES, log=WATCH_LOG[-80:])
+
+@app.route("/scan-now", methods=["POST"])
+@login_required
+def scan_now():
+    # manual trigger to process the input folder immediately (doesn't wait for the timer)
+    api_key = os.environ.get("SEAMLESS_API_KEY", "")
+    if not (core.watch_enabled() and api_key):
+        return jsonify(error="Watcher not configured."), 400
+    threading.Thread(target=lambda: core.scan_input_folder_once(api_key, logfn=_watch_log),
+                     daemon=True).start()
+    return jsonify(ok=True)
 
 @app.route("/login", methods=["GET", "POST"])
 def login():

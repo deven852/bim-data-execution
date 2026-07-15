@@ -750,6 +750,131 @@ def sync_master_after_run():
         return master_push_to_drive()
 
 
+# ---------------------------------------------------------------------------
+# WATCHED FOLDER (hot folder): drop a CSV/XLSX in the Input folder -> it is
+# processed automatically and results land in the Output folder.
+#   Env: GDRIVE_INPUT_FOLDER, GDRIVE_OUTPUT_FOLDER, AUTO_MAX_COMPANIES (safety cap)
+# A processed input is renamed with a "[done] " prefix so it is never re-run.
+# ---------------------------------------------------------------------------
+DONE_PREFIX = "[done] "
+SKIP_PREFIX = "[skipped] "
+AUTO_MAX_COMPANIES = int(os.environ.get("AUTO_MAX_COMPANIES", "50"))
+
+def watch_enabled():
+    return drive_enabled() and bool(os.environ.get("GDRIVE_INPUT_FOLDER")) and bool(os.environ.get("GDRIVE_OUTPUT_FOLDER"))
+
+def _drive_list_inputs(token):
+    """Return [{id,name,mimeType}] of un-processed CSV/XLSX files in the input folder."""
+    folder = os.environ["GDRIVE_INPUT_FOLDER"]
+    q = (f"'{folder}' in parents and trashed=false")
+    r = requests.get(GDRIVE_FILES_URL, headers={"Authorization": f"Bearer {token}"},
+                     params={"q": q, "fields": "files(id,name,mimeType)",
+                             "supportsAllDrives": "true", "includeItemsFromAllDrives": "true"},
+                     timeout=30)
+    r.raise_for_status()
+    out = []
+    for f in r.json().get("files", []):
+        nm = f.get("name", "")
+        low = nm.lower()
+        if nm.startswith(DONE_PREFIX) or nm.startswith(SKIP_PREFIX):
+            continue
+        if low.endswith(".csv") or low.endswith(".xlsx") or low.endswith(".xlsm") or low.endswith(".tsv"):
+            out.append(f)
+    return out
+
+def _drive_rename(token, fid, new_name):
+    r = requests.patch(f"{GDRIVE_FILES_URL}/{fid}",
+                       headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                       params={"supportsAllDrives": "true"},
+                       data=json.dumps({"name": new_name}), timeout=30)
+    r.raise_for_status()
+
+def _drive_upload_to(token, folder_id, local_path, drive_name, mime):
+    with open(local_path, "rb") as f:
+        data = f.read()
+    boundary = "----bimwatch7hf83n"
+    meta = {"name": drive_name, "parents": [folder_id]}
+    body = ((f"--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{json.dumps(meta)}\r\n").encode()
+            + f"--{boundary}\r\nContent-Type: {mime}\r\n\r\n".encode() + data
+            + f"\r\n--{boundary}--".encode())
+    r = requests.post(GDRIVE_UPLOAD_URL, headers={"Authorization": f"Bearer {token}",
+                      "Content-Type": f"multipart/related; boundary={boundary}"}, data=body, timeout=120)
+    r.raise_for_status()
+    return r.json().get("id")
+
+def process_input_file(fmeta, api_key, logfn=None, max_contacts=None):
+    """Download one input file, run the pipeline, upload results to the output folder,
+    and mark the input as done. Uses the permanent master (reuse = free). Returns a summary dict."""
+    def say(m):
+        (logfn or log)(m)
+    token = _drive_access_token()
+    fid, name = fmeta["id"], fmeta["name"]
+    workdir = os.path.dirname(MASTER_DB)
+    local_in = os.path.join(workdir, "_auto_in_" + re.sub(r"[^A-Za-z0-9._-]", "_", name))
+    _drive_download(token, fid, local_in)
+
+    headers = auth_headers(api_key)
+    companies = load_companies(local_in)
+    capped = False
+    if len(companies) > AUTO_MAX_COMPANIES:
+        companies = companies[:AUTO_MAX_COMPANIES]
+        capped = True
+    say(f"[auto] {name}: {len(companies)} companies"
+        + (f" (CAPPED at {AUTO_MAX_COMPANIES})" if capped else ""))
+
+    # pull permanent master so already-known companies are reused free
+    sync_master_before_run()
+
+    all_rows, found, cached_n, nomatch = [], 0, 0, 0
+    for i, company in enumerate(companies, 1):
+        try:
+            rows, kind = process_company(company, headers, max_contacts=max_contacts or MAX_CONTACTS_PER_COMPANY)
+        except Exception as e:
+            rows, kind = [note_row(company, f"ERROR: {e}")], "error"
+        all_rows.extend(rows)
+        if kind == "cached": cached_n += len([r for r in rows if r.get("First Name")]); found += 1
+        elif kind == "found": found += 1
+        elif kind == "nomatch" or kind == "nocontacts": nomatch += 1
+        say(f"[auto] {name}: {i}/{len(companies)} {company}"
+            + (" (from master, free)" if kind == "cached" else ""))
+
+    # write + upload results
+    out_local = os.path.join(workdir, "_auto_out.xlsx")
+    write_xlsx(all_rows, out_local)
+    import datetime as _dt
+    stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M")
+    base = re.sub(r"\.(csv|xlsx|xlsm|tsv)$", "", name, flags=re.I)
+    out_name = f"RESULTS_{base}_{stamp}.xlsx"
+    out_id = _drive_upload_to(token, os.environ["GDRIVE_OUTPUT_FOLDER"], out_local, out_name,
+                              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    # update permanent master with anything newly researched
+    sync_master_after_run()
+    # mark input as done
+    try: _drive_rename(token, fid, DONE_PREFIX + name)
+    except Exception: pass
+    for p in (local_in, out_local):
+        try: os.remove(p)
+        except Exception: pass
+
+    say(f"[auto] {name}: DONE - {len(all_rows)} rows, {cached_n} reused free, saved '{out_name}' to Output.")
+    return {"input": name, "output": out_name, "output_id": out_id, "rows": len(all_rows),
+            "reused_free": cached_n, "capped": capped}
+
+def scan_input_folder_once(api_key, logfn=None, max_contacts=None):
+    """Process every new file currently in the input folder. Returns list of summaries."""
+    if not watch_enabled():
+        return []
+    token = _drive_access_token()
+    files = _drive_list_inputs(token)
+    results = []
+    for fmeta in files:
+        try:
+            results.append(process_input_file(fmeta, api_key, logfn=logfn, max_contacts=max_contacts))
+        except Exception as e:
+            (logfn or log)(f"[auto] {fmeta.get('name')}: ERROR {e}")
+    return results
+
+
 def main():
     ap = argparse.ArgumentParser(description="BIM Data Execution - all hierarchy contacts per company")
     ap.add_argument("--input", required=True); ap.add_argument("--output", default="results.xlsx")
