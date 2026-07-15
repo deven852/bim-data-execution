@@ -625,6 +625,131 @@ def drive_upload(local_path, drive_name=None, mime="application/vnd.openxmlforma
         return None
 
 
+# ---------------------------------------------------------------------------
+# PERMANENT MASTER stored as a single Excel file in Drive (survives free-tier
+# restarts). Flow each run: pull master from Drive -> merge into local SQLite ->
+# push updated master back to the same Drive file.
+# ---------------------------------------------------------------------------
+MASTER_DRIVE_NAME = "BIM_MASTER_CONTACTS.xlsx"
+GDRIVE_FILES_URL = "https://www.googleapis.com/drive/v3/files"
+GDRIVE_UPDATE_URL = "https://www.googleapis.com/upload/drive/v3/files/{fid}?uploadType=media&supportsAllDrives=true"
+_MASTER_SYNC_LOCK = threading.Lock()
+
+def _drive_find_master(token):
+    """Return the fileId of the master Excel in the folder, or None."""
+    folder = os.environ["GDRIVE_FOLDER_ID"]
+    q = f"name='{MASTER_DRIVE_NAME}' and '{folder}' in parents and trashed=false"
+    r = requests.get(GDRIVE_FILES_URL, headers={"Authorization": f"Bearer {token}"},
+                     params={"q": q, "fields": "files(id,name)",
+                             "supportsAllDrives": "true", "includeItemsFromAllDrives": "true"},
+                     timeout=30)
+    r.raise_for_status()
+    files = r.json().get("files", [])
+    return files[0]["id"] if files else None
+
+def _drive_download(token, fid, dest_path):
+    r = requests.get(f"{GDRIVE_FILES_URL}/{fid}",
+                     headers={"Authorization": f"Bearer {token}"},
+                     params={"alt": "media", "supportsAllDrives": "true"}, timeout=120)
+    r.raise_for_status()
+    with open(dest_path, "wb") as f:
+        f.write(r.content)
+
+def _import_master_xlsx_into_db(path):
+    """Load a master Excel (exported by export_master_xlsx) back into the SQLite cache."""
+    wb = load_workbook(path, read_only=True, data_only=True)
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return 0
+    hdr = [str(h).strip() if h else "" for h in rows[0]]
+    idx = {h: i for i, h in enumerate(hdr)}
+    def g(r, key):
+        i = idx.get(key)
+        return (r[i] if (i is not None and i < len(r) and r[i] is not None) else "")
+    imported = []
+    for r in rows[1:]:
+        if not any(v not in (None, "") for v in r):
+            continue
+        imported.append({
+            "Company Name": g(r, "Company"), "Tier": g(r, "Tier"),
+            "Hierarchy Role": g(r, "Hierarchy Role"), "First Name": g(r, "First Name"),
+            "Last Name": g(r, "Last Name"), "Job Title": g(r, "Job Title"),
+            "Email": g(r, "Email"), "Phone Number": g(r, "Phone Number"),
+            "LinkedIn Profile": g(r, "LinkedIn Profile"), "Company Domain": g(r, "Company Domain"),
+        })
+    if imported:
+        cache_save(imported)   # upsert into SQLite by cache_key
+    return len(imported)
+
+def master_pull_from_drive():
+    """Download the Drive master (if any) and merge it into the local SQLite. Safe no-op if Drive off."""
+    if not drive_enabled():
+        return 0
+    try:
+        token = _drive_access_token()
+        fid = _drive_find_master(token)
+        if not fid:
+            return 0
+        tmp = os.path.join(os.path.dirname(MASTER_DB), "_master_pull.xlsx")
+        _drive_download(token, fid, tmp)
+        n = _import_master_xlsx_into_db(tmp)
+        try: os.remove(tmp)
+        except Exception: pass
+        return n
+    except Exception as e:
+        log(f"      [drive] master pull failed: {e}")
+        return 0
+
+def master_push_to_drive():
+    """Export the whole SQLite cache to the single permanent master file in Drive (create or overwrite)."""
+    if not drive_enabled():
+        return None
+    try:
+        token = _drive_access_token()
+        tmp = os.path.join(os.path.dirname(MASTER_DB), "_master_push.xlsx")
+        export_master_xlsx(tmp)
+        fid = _drive_find_master(token)
+        with open(tmp, "rb") as f:
+            data = f.read()
+        try: os.remove(tmp)
+        except Exception: pass
+        mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        if fid:
+            # overwrite existing master (keeps same file & link)
+            r = requests.patch(GDRIVE_UPDATE_URL.format(fid=fid),
+                               headers={"Authorization": f"Bearer {token}", "Content-Type": mime},
+                               data=data, timeout=120)
+            r.raise_for_status()
+        else:
+            # create it once
+            boundary = "----bimmaster7hf83n"
+            meta = {"name": MASTER_DRIVE_NAME, "parents": [os.environ["GDRIVE_FOLDER_ID"]]}
+            body = ((f"--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{json.dumps(meta)}\r\n").encode()
+                    + f"--{boundary}\r\nContent-Type: {mime}\r\n\r\n".encode() + data
+                    + f"\r\n--{boundary}--".encode())
+            r = requests.post(GDRIVE_UPLOAD_URL,
+                              headers={"Authorization": f"Bearer {token}",
+                                       "Content-Type": f"multipart/related; boundary={boundary}"},
+                              data=body, timeout=120)
+            r.raise_for_status()
+            fid = r.json().get("id")
+        return f"https://drive.google.com/file/d/{fid}/view" if fid else None
+    except Exception as e:
+        log(f"      [drive] master push failed: {e}")
+        return None
+
+def sync_master_before_run():
+    """Pull the permanent Drive master into local cache before a run (thread-safe)."""
+    with _MASTER_SYNC_LOCK:
+        return master_pull_from_drive()
+
+def sync_master_after_run():
+    """Push the updated local cache back to the permanent Drive master (thread-safe)."""
+    with _MASTER_SYNC_LOCK:
+        return master_push_to_drive()
+
+
 def main():
     ap = argparse.ArgumentParser(description="BIM Data Execution - all hierarchy contacts per company")
     ap.add_argument("--input", required=True); ap.add_argument("--output", default="results.xlsx")

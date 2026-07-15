@@ -98,6 +98,13 @@ def run_job(job_id, input_path, api_key, cfg):
            found=0, nomatch=0, skipped=0, errors=0, contacts=0, preview=preview)
     mode = "PREVIEW (free, no credits)" if preview else "RUN (uses credits)"
 
+    # Pull the PERMANENT master from Drive into the local cache first, so reuse
+    # reflects everything the team has ever researched (survives free-tier resets).
+    if core.drive_enabled() and not preview:
+        pulled = core.sync_master_before_run()
+        if pulled:
+            add_log(f"Loaded {pulled} contacts from the permanent master in Drive.")
+
     # Save the uploaded INPUT to the shared Drive folder (if Drive is configured)
     if core.drive_enabled():
         import datetime as _dt
@@ -168,6 +175,12 @@ def run_job(job_id, input_path, api_key, cfg):
         drive_link = core.drive_upload(out_path, drive_name=f"{tag}_{stamp}.xlsx")
         if drive_link:
             add_log(f"Output saved to shared Drive: {drive_link}")
+
+    # Push the updated cache back to the PERMANENT master in Drive (accumulates forever)
+    if core.drive_enabled() and not preview:
+        mlink = core.sync_master_after_run()
+        if mlink:
+            add_log(f"Permanent master updated in Drive: {mlink}")
 
     update(status="done", output=out_path, company="", drive_link=drive_link)
     if preview:
@@ -282,6 +295,9 @@ def export_master():
 @login_required
 def master_stats():
     try:
+        # reflect the permanent Drive master, not just this instance's local cache
+        if core.drive_enabled():
+            core.sync_master_before_run()
         return jsonify(core.cache_stats())
     except Exception as e:
         return jsonify(error=str(e)), 500
