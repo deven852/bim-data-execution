@@ -29,6 +29,58 @@ _DB_LOCK = threading.Lock()
 def _norm(s):
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
+# Corporate/legal suffixes and connector words to strip when comparing company names.
+_COMPANY_STRIP = re.compile(
+    r"\b(inc|inc\.|incorporated|llc|l\.l\.c|ltd|limited|co|co\.|company|corp|corp\.|corporation|"
+    r"plc|lp|llp|pllc|pc|gmbh|holdings|group|companies|services|solutions|the|and|&|of)\b",
+    re.I)
+_COMPANY_NOISE = re.compile(r"[^\w\s]+")
+
+def _norm_company(s):
+    """Aggressively normalise a company name for matching: lowercase, strip corporate
+    suffixes and punctuation, collapse whitespace."""
+    if not s: return ""
+    x = s.lower()
+    x = _COMPANY_NOISE.sub(" ", x)
+    x = _COMPANY_STRIP.sub(" ", x)
+    x = re.sub(r"\s+", " ", x).strip()
+    return x
+
+def _company_matches(asked, found):
+    """Smart, not strict: is the Seamless-reported company 'found' plausibly the same
+    as the company we asked for? Returns True for exact match, substring match either
+    way, or a strong token overlap. Blank 'found' -> False."""
+    if not found or not asked:
+        return False
+    a = _norm_company(asked); b = _norm_company(found)
+    if not a or not b:
+        return False
+    if a == b or a in b or b in a:
+        return True
+    # Token overlap. Strip generic industry words that are shared across many firms.
+    stop = {"construction", "contractors", "contracting", "builders", "building",
+            "services", "consulting", "engineering", "engineers", "systems",
+            "industries", "international", "national", "global", "associates",
+            "partners", "enterprises", "management", "development", "properties",
+            "realty", "real", "estate", "financial", "capital", "holdings",
+            "group", "companies", "solutions"}
+    def toks(x):
+        return [t for t in x.split() if len(t) >= 3 and t not in stop]
+    at, bt = toks(a), toks(b)
+    if not at or not bt:
+        return False
+    shared = set(at) & set(bt)
+    if not shared:
+        return False
+    # Strong: at least 2 shared distinctive tokens
+    if len(shared) >= 2:
+        return True
+    # Or: the shared token is the ONLY distinctive token on BOTH sides
+    # (e.g. "GLF" alone vs "GLF" alone -> same firm; "Harbor" vs "Harbor Freight" -> not)
+    if len(at) == 1 and len(bt) == 1:
+        return True
+    return False
+
 def _cache_key(company, first, last, role):
     return f"{_norm(company)}|{_norm(first)} {_norm(last)}|{_norm(role)}"
 
@@ -489,6 +541,26 @@ def process_company(company, headers, search_limit=None, poll_interval=None,
     candidates = search_candidates(company, headers, limit=search_limit)
     if not candidates:
         return [note_row(company, "No contacts found for this company in Seamless search.")], "nocontacts"
+
+    # --- COMPANY-MATCH FILTER: drop candidates whose Seamless "company" field
+    # doesn't plausibly match the company we asked for. Fixes "wrong person for
+    # the company" (e.g. searching Harbor Contracting and getting Harbor Freight).
+    kept, dropped = [], []
+    for c in candidates:
+        cand_co = c.get("companyName") or c.get("company") or c.get("companyOriginal") or ""
+        if _company_matches(company, cand_co):
+            kept.append(c)
+        else:
+            dropped.append((c.get("name") or "?", cand_co))
+    if dropped:
+        # Log up to 3 examples of what got dropped, so the user can see the filter working
+        examples = ", ".join(f"{n} @ {co!r}" for n, co in dropped[:3])
+        log(f"      [filter] {company}: dropped {len(dropped)} candidate(s) at other companies "
+            f"(e.g. {examples})")
+    candidates = kept
+    if not candidates:
+        return [note_row(company, "All Seamless candidates worked at differently-named "
+                         "companies; skipped to avoid wrong-company contacts.")], "nomatch"
 
     ranked = rank_candidates(candidates)
     if min_rank is not None:
