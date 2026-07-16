@@ -218,6 +218,16 @@ USABLE_STATUSES           = {"done", "duplicate"}
 COMPANY_COLUMN_CANDIDATES = ["company", "company name", "companyname", "firm", "firm name"]
 DOMAIN_COLUMN_CANDIDATES = ["website", "domain", "url", "company website", "company domain",
                             "web", "site"]
+EMAIL_COLUMN_CANDIDATES = ["email", "email address", "contact email", "e-mail"]
+
+def _domain_from_email(s):
+    """Extract the domain portion of an email, so 'john@bcsconstructiongroup.com' -> 'bcsconstructiongroup.com'.
+    Returns '' if the string isn't email-shaped."""
+    if not s: return ""
+    s = str(s).strip()
+    if "@" not in s: return ""
+    part = s.split("@", 1)[1].strip()
+    return _norm_domain(part)
 
 # ============================================================================
 # HIERARCHY  (user-defined, priority order: index 1 = highest priority)
@@ -341,10 +351,12 @@ def load_companies(path):
     header = [("" if c is None else str(c)).strip() for c in rows[0]]
     col_idx = None
     dom_idx = None
+    email_idx = None
     for i, h in enumerate(header):
         hl = h.strip().lower()
         if col_idx is None and hl in COMPANY_COLUMN_CANDIDATES: col_idx = i
         if dom_idx is None and hl in DOMAIN_COLUMN_CANDIDATES: dom_idx = i
+        if email_idx is None and hl in EMAIL_COLUMN_CANDIDATES: email_idx = i
     if col_idx is None:
         raise ValueError(f'No company column found. Headers: {header}. Expected one of: {COMPANY_COLUMN_CANDIDATES}')
     companies = []
@@ -356,8 +368,22 @@ def load_companies(path):
             if name.startswith("(") and name.endswith(")"):
                 continue
             domain = ""
+            email_cell = ""
+            web_cell = ""
+            if email_idx is not None and email_idx < len(r) and r[email_idx] is not None:
+                email_cell = str(r[email_idx]).strip()
             if dom_idx is not None and dom_idx < len(r) and r[dom_idx] is not None:
-                domain = _norm_domain(str(r[dom_idx]))
+                web_cell = str(r[dom_idx]).strip()
+            # Rule: pick Email OR Website, not both. Prefer Email if both filled.
+            if email_cell and web_cell:
+                log(f"      [input] '{name}': both Email and Website provided - using Email, ignoring Website.")
+                domain = _domain_from_email(email_cell)
+            elif email_cell:
+                domain = _domain_from_email(email_cell)
+                if not domain:
+                    log(f"      [input] '{name}': Email value {email_cell!r} isn't a valid email; ignoring.")
+            elif web_cell:
+                domain = _norm_domain(web_cell)
             key = (name.lower(), domain)
             if name and key not in seen:
                 seen.add(key); companies.append((name, domain))
@@ -1048,18 +1074,21 @@ def _universal_ensure_input(token, logfn=None):
         return f
     tmp = os.path.join(os.path.dirname(MASTER_DB), "_universal_tpl.xlsx")
     wb = Workbook(); ws = wb.active; ws.title = "Companies"
-    ws.append(["Company", "Website"])
-    # Add a short instruction row so anyone opening the file understands the columns
+    ws.append(["Company", "Website", "Email"])
+    # Add a short instruction row so anyone opening the file understands the columns.
+    # Loader skips rows whose Company cell is wrapped in parentheses.
     ws.append(["(paste company name here, one per row)",
-               "(optional: exact website like bcsconstructiongroup.com - improves accuracy)"])
+               "(optional: exact website like bcsconstructiongroup.com)",
+               "(optional: any email at the company like john@bcsconstructiongroup.com - fill EITHER Website OR Email, not both)"])
     wb.save(tmp)
     fid = _drive_upload_to(token, os.environ["GDRIVE_INPUT_FOLDER"], tmp,
                            UNIVERSAL_INPUT_BASE + ".xlsx", XLSX_MIME)
     try: os.remove(tmp)
     except Exception: pass
     (logfn or log)(f"[universal] Created '{UNIVERSAL_INPUT_BASE}.xlsx' in the Input folder - "
-                   "open it, put company names in the 'Company' column, and optionally put an "
-                   "exact website in 'Website' (e.g. bcsconstructiongroup.com) for stricter matching.")
+                   "open it, put company names in 'Company', and (optionally) fill EITHER "
+                   "'Website' (e.g. bcsconstructiongroup.com) OR 'Email' (e.g. john@bcs...) "
+                   "for stricter, correct-company matching.")
     return {"id": fid, "name": UNIVERSAL_INPUT_BASE + ".xlsx", "mimeType": XLSX_MIME,
             "modifiedTime": "1970-01-01T00:00:00Z"}
 
