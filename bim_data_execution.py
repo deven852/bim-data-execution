@@ -1076,9 +1076,14 @@ def _universal_write_output(token, fid, rows, processed):
         except Exception: pass
     return fid
 
+_UNIVERSAL_STATE = {"input_mtime": "", "processed": None, "checked_at": 0.0}
+
 def scan_universal_once(api_key, logfn=None, max_contacts=None):
     """Check the universal input file. If it changed and has been quiet long enough,
-    process only the NEW companies and append them to the universal output."""
+    process only the NEW companies and append them to the universal output.
+
+    Fast-path: if the input's Drive modifiedTime hasn't changed since our last check
+    AND we have a cached 'processed' set, we skip the expensive download entirely."""
     def say(m): (logfn or log)(m)
     if not watch_enabled():
         return []
@@ -1088,8 +1093,19 @@ def scan_universal_once(api_key, logfn=None, max_contacts=None):
     # QUIET TIMER: skip if the file was edited too recently (someone may still be typing)
     age = time.time() - _parse_drive_time(f.get("modifiedTime", ""))
     if age < UNIVERSAL_QUIET_SECONDS:
-        say(f"[universal] input edited {int(age)}s ago - waiting for it to be quiet "
-            f"({UNIVERSAL_QUIET_SECONDS}s) before processing.")
+        # only log this once every ~5 min to avoid log spam on every ping
+        if time.time() - _UNIVERSAL_STATE["checked_at"] > 300:
+            say(f"[universal] input edited {int(age)}s ago - waiting for it to be quiet "
+                f"({UNIVERSAL_QUIET_SECONDS}s) before processing.")
+            _UNIVERSAL_STATE["checked_at"] = time.time()
+        return []
+
+    input_mtime = f.get("modifiedTime", "")
+
+    # FAST PATH: input hasn't changed since our last successful scan -> nothing to do,
+    # skip the whole Drive download/upload round trip that was blowing up memory.
+    if (_UNIVERSAL_STATE["input_mtime"] == input_mtime
+            and _UNIVERSAL_STATE["processed"] is not None):
         return []
 
     try:
@@ -1101,6 +1117,9 @@ def scan_universal_once(api_key, logfn=None, max_contacts=None):
     fid, rows, processed = _universal_load_output(token)
     new = [c for c in companies if _norm(c) not in processed]
     if not new:
+        # remember state so future scans can skip the download until input changes again
+        _UNIVERSAL_STATE.update({"input_mtime": input_mtime, "processed": processed,
+                                 "checked_at": time.time()})
         return []
     capped = len(new) > AUTO_MAX_COMPANIES
     new = new[:AUTO_MAX_COMPANIES]
@@ -1123,6 +1142,9 @@ def scan_universal_once(api_key, logfn=None, max_contacts=None):
 
     fid = _universal_write_output(token, fid, rows, processed)
     sync_master_after_run()
+    # Update fast-path state to the current mtime so we don't re-scan until input changes
+    _UNIVERSAL_STATE.update({"input_mtime": input_mtime, "processed": processed,
+                             "checked_at": time.time()})
     say(f"[universal] DONE - {done} company(ies) added to {UNIVERSAL_OUTPUT_NAME}.")
     return [{"new_companies": done, "output": UNIVERSAL_OUTPUT_NAME, "capped": capped}]
 
