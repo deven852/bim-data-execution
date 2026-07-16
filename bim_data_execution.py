@@ -1076,43 +1076,54 @@ def _universal_write_output(token, fid, rows, processed):
         except Exception: pass
     return fid
 
-_UNIVERSAL_STATE = {"input_mtime": "", "processed": None, "checked_at": 0.0}
+_UNIVERSAL_STATE = {"input_mtime": "", "processed": None, "checked_at": 0.0,
+                    "last_status_at": 0.0}
 
 def scan_universal_once(api_key, logfn=None, max_contacts=None):
     """Check the universal input file. If it changed and has been quiet long enough,
     process only the NEW companies and append them to the universal output.
 
     Fast-path: if the input's Drive modifiedTime hasn't changed since our last check
-    AND we have a cached 'processed' set, we skip the expensive download entirely."""
+    AND we have a cached 'processed' set, we skip the expensive download entirely.
+    A status line is logged at most once every ~5 min so 'nothing happening' scans
+    still leave visible traces without spamming the log."""
     def say(m): (logfn or log)(m)
+    def status(m):
+        # heartbeat: prints once every 5 min so /watch-status always shows recent state
+        if time.time() - _UNIVERSAL_STATE["last_status_at"] > 300:
+            say(m); _UNIVERSAL_STATE["last_status_at"] = time.time()
     if not watch_enabled():
         return []
-    token = _drive_access_token()
-    f = _universal_ensure_input(token, logfn=logfn)
-
-    # QUIET TIMER: skip if the file was edited too recently (someone may still be typing)
-    age = time.time() - _parse_drive_time(f.get("modifiedTime", ""))
-    if age < UNIVERSAL_QUIET_SECONDS:
-        # only log this once every ~5 min to avoid log spam on every ping
-        if time.time() - _UNIVERSAL_STATE["checked_at"] > 300:
-            say(f"[universal] input edited {int(age)}s ago - waiting for it to be quiet "
-                f"({UNIVERSAL_QUIET_SECONDS}s) before processing.")
-            _UNIVERSAL_STATE["checked_at"] = time.time()
+    try:
+        token = _drive_access_token()
+        f = _universal_ensure_input(token, logfn=logfn)
+    except Exception as e:
+        say(f"[universal] could not reach Drive: {e}")
         return []
 
     input_mtime = f.get("modifiedTime", "")
+    age = time.time() - _parse_drive_time(input_mtime)
 
-    # FAST PATH: input hasn't changed since our last successful scan -> nothing to do,
-    # skip the whole Drive download/upload round trip that was blowing up memory.
-    if (_UNIVERSAL_STATE["input_mtime"] == input_mtime
-            and _UNIVERSAL_STATE["processed"] is not None):
+    # QUIET TIMER: only skip if the file was edited too recently (someone may still be typing)
+    if age < UNIVERSAL_QUIET_SECONDS:
+        status(f"[universal] input edited {int(age)}s ago - waiting for it to be quiet "
+               f"({UNIVERSAL_QUIET_SECONDS}s) before processing.")
         return []
 
+    # FAST PATH: input hasn't changed since our last successful scan -> nothing to do,
+    # skip the whole Drive download/upload round trip.
+    if (_UNIVERSAL_STATE["input_mtime"] == input_mtime
+            and _UNIVERSAL_STATE["processed"] is not None):
+        status(f"[universal] input unchanged (mtime {input_mtime}) - nothing to do.")
+        return []
+
+    say(f"[universal] input changed (edited {int(age)}s ago) - reading it now.")
     try:
         companies = _universal_read_companies(token, f)
     except Exception as e:
         say(f"[universal] could not read input file: {e}")
         return []
+    say(f"[universal] input has {len(companies)} company name(s) total.")
 
     fid, rows, processed = _universal_load_output(token)
     new = [c for c in companies if _norm(c) not in processed]
