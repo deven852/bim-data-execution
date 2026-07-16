@@ -46,6 +46,24 @@ def _norm_company(s):
     x = re.sub(r"\s+", " ", x).strip()
     return x
 
+def _norm_domain(s):
+    """Strip protocol/www/path and lowercase, so any of these normalize to the same domain:
+       https://www.example.com/about, example.com/, EXAMPLE.com -> example.com"""
+    if not s: return ""
+    x = s.strip().lower()
+    x = re.sub(r"^https?://", "", x)
+    x = re.sub(r"^www\.", "", x)
+    x = x.split("/")[0].split("?")[0].strip()
+    return x
+
+def _domain_matches(asked, found):
+    """Compare two domains loosely: exact match, or one ends with the other so that a
+    subdomain still matches (e.g. 'careers.acme.com' matches 'acme.com')."""
+    a = _norm_domain(asked); b = _norm_domain(found)
+    if not a or not b: return False
+    if a == b: return True
+    return a.endswith("." + b) or b.endswith("." + a)
+
 def _company_matches(asked, found):
     """Smart, not strict: is the Seamless-reported company 'found' plausibly the same
     as the company we asked for? Returns True for exact match, substring match either
@@ -76,9 +94,17 @@ def _company_matches(asked, found):
     if len(shared) >= 2:
         return True
     # Or: the shared token is the ONLY distinctive token on BOTH sides
-    # (e.g. "GLF" alone vs "GLF" alone -> same firm; "Harbor" vs "Harbor Freight" -> not)
+    # (e.g. "GLF Construction" vs "GLF Construction Corp" both reduce to just "GLF"
+    # after stop-words). This case is safe only when the shared token is fairly
+    # long/rare -- otherwise a short acronym like "BCS" would let "BCS Construction
+    # Group" match "BCS Financial Corporation", which is wrong. Require:
+    #  - single-token-on-each-side, AND
+    #  - the shared token is at least 5 chars long (so real acronyms like "GLF",
+    #    "BCS", "AAA", "MTC" fall through unless they also share something else).
     if len(at) == 1 and len(bt) == 1:
-        return True
+        shared_tok = next(iter(shared))
+        if len(shared_tok) >= 5:
+            return True
     return False
 
 def _cache_key(company, first, last, role):
@@ -190,6 +216,8 @@ DONE_STATUSES             = {"done", "error", "missing", "duplicate"}
 USABLE_STATUSES           = {"done", "duplicate"}
 
 COMPANY_COLUMN_CANDIDATES = ["company", "company name", "companyname", "firm", "firm name"]
+DOMAIN_COLUMN_CANDIDATES = ["website", "domain", "url", "company website", "company domain",
+                            "web", "site"]
 
 # ============================================================================
 # HIERARCHY  (user-defined, priority order: index 1 = highest priority)
@@ -312,8 +340,11 @@ def load_companies(path):
     if not rows: raise ValueError("File is empty.")
     header = [("" if c is None else str(c)).strip() for c in rows[0]]
     col_idx = None
+    dom_idx = None
     for i, h in enumerate(header):
-        if h.strip().lower() in COMPANY_COLUMN_CANDIDATES: col_idx = i; break
+        hl = h.strip().lower()
+        if col_idx is None and hl in COMPANY_COLUMN_CANDIDATES: col_idx = i
+        if dom_idx is None and hl in DOMAIN_COLUMN_CANDIDATES: dom_idx = i
     if col_idx is None:
         raise ValueError(f'No company column found. Headers: {header}. Expected one of: {COMPANY_COLUMN_CANDIDATES}')
     companies = []
@@ -321,8 +352,15 @@ def load_companies(path):
     for r in rows[1:]:
         if col_idx < len(r) and r[col_idx] is not None:
             name = str(r[col_idx]).strip()
-            if name and name.lower() not in seen:
-                seen.add(name.lower()); companies.append(name)
+            # Skip the template hint row created by _universal_ensure_input
+            if name.startswith("(") and name.endswith(")"):
+                continue
+            domain = ""
+            if dom_idx is not None and dom_idx < len(r) and r[dom_idx] is not None:
+                domain = _norm_domain(str(r[dom_idx]))
+            key = (name.lower(), domain)
+            if name and key not in seen:
+                seen.add(key); companies.append((name, domain))
     if not companies: raise ValueError("Company column found, but no non-empty company names.")
     return companies
 
@@ -492,9 +530,10 @@ def safe_json(resp, label):
     except Exception:
         raise RuntimeError(f"{label}: non-JSON response: {resp.text[:300]}")
 
-def search_candidates(company, headers, limit=None):
+def search_candidates(company, headers, limit=None, domain=""):
     limit = limit or SEARCH_LIMIT
-    body = {"companyName": company, "companyDomain": "", "limit": limit}
+    body = {"companyName": company, "companyDomain": _norm_domain(domain) if domain else "",
+            "limit": limit}
     data = safe_json(_request("POST", EP_SEARCH, headers, json=body), "search")
     return data.get("data") or data.get("contacts") or data.get("results") or []
 
@@ -527,10 +566,14 @@ def _id_of(c):
 
 def process_company(company, headers, search_limit=None, poll_interval=None,
                     poll_attempts=None, min_rank=None, max_contacts=None,
-                    preview=False, use_cache=True):
+                    preview=False, use_cache=True, company_domain=""):
     """Return (rows, kind). rows is a list (one per contact) or a single note row.
-    kind: nocontacts | nomatch | would | found | cached | error(handled by caller)"""
+    kind: nocontacts | nomatch | would | found | cached | error(handled by caller)
+
+    If company_domain is given, it's passed to Seamless search AND each candidate must
+    match on BOTH company name and domain (safest 'use website + name together' mode)."""
     max_contacts = max_contacts or MAX_CONTACTS_PER_COMPANY
+    company_domain = _norm_domain(company_domain) if company_domain else ""
 
     # 0) MASTER STORE: if we already researched this company, reuse it for free.
     if use_cache and not preview:
@@ -538,29 +581,39 @@ def process_company(company, headers, search_limit=None, poll_interval=None,
         if cached:
             return cached, "cached"
 
-    candidates = search_candidates(company, headers, limit=search_limit)
+    candidates = search_candidates(company, headers, limit=search_limit, domain=company_domain)
     if not candidates:
         return [note_row(company, "No contacts found for this company in Seamless search.")], "nocontacts"
 
     # --- COMPANY-MATCH FILTER: drop candidates whose Seamless "company" field
     # doesn't plausibly match the company we asked for. Fixes "wrong person for
     # the company" (e.g. searching Harbor Contracting and getting Harbor Freight).
+    # If a domain was supplied, require BOTH name and domain to match (safest mode).
     kept, dropped = [], []
     for c in candidates:
         cand_co = c.get("companyName") or c.get("company") or c.get("companyOriginal") or ""
-        if _company_matches(company, cand_co):
+        cand_dom = c.get("companyDomain") or c.get("domain") or ""
+        name_ok = _company_matches(company, cand_co)
+        dom_ok = (not company_domain) or _domain_matches(company_domain, cand_dom)
+        if name_ok and dom_ok:
             kept.append(c)
         else:
-            dropped.append((c.get("name") or "?", cand_co))
+            reason = ("domain" if (name_ok and not dom_ok)
+                      else "name" if (not name_ok and dom_ok) else "name+domain")
+            dropped.append((c.get("name") or "?", cand_co, cand_dom, reason))
     if dropped:
         # Log up to 3 examples of what got dropped, so the user can see the filter working
-        examples = ", ".join(f"{n} @ {co!r}" for n, co in dropped[:3])
+        examples = ", ".join(f"{n} @ {co!r} ({r})" for n, co, _d, r in dropped[:3])
         log(f"      [filter] {company}: dropped {len(dropped)} candidate(s) at other companies "
             f"(e.g. {examples})")
     candidates = kept
     if not candidates:
-        return [note_row(company, "All Seamless candidates worked at differently-named "
-                         "companies; skipped to avoid wrong-company contacts.")], "nomatch"
+        msg = ("All Seamless candidates worked at other companies; skipped to avoid "
+               "wrong-company contacts.")
+        if company_domain:
+            msg = (f"All Seamless candidates for '{company}' failed the name-or-domain "
+                   f"match against {company_domain}. Skipped.")
+        return [note_row(company, msg)], "nomatch"
 
     ranked = rank_candidates(candidates)
     if min_rank is not None:
@@ -900,9 +953,11 @@ def process_input_file(fmeta, api_key, logfn=None, max_contacts=None):
     sync_master_before_run()
 
     all_rows, found, cached_n, nomatch = [], 0, 0, 0
-    for i, company in enumerate(companies, 1):
+    for i, (company, domain) in enumerate(companies, 1):
         try:
-            rows, kind = process_company(company, headers, max_contacts=max_contacts or MAX_CONTACTS_PER_COMPANY)
+            rows, kind = process_company(company, headers,
+                                         max_contacts=max_contacts or MAX_CONTACTS_PER_COMPANY,
+                                         company_domain=domain)
         except Exception as e:
             rows, kind = [note_row(company, f"ERROR: {e}")], "error"
         all_rows.extend(rows)
@@ -910,6 +965,7 @@ def process_input_file(fmeta, api_key, logfn=None, max_contacts=None):
         elif kind == "found": found += 1
         elif kind == "nomatch" or kind == "nocontacts": nomatch += 1
         say(f"[auto] {name}: {i}/{len(companies)} {company}"
+            + (f" [{domain}]" if domain else "")
             + (" (from master, free)" if kind == "cached" else ""))
 
     # write + upload results
@@ -991,14 +1047,19 @@ def _universal_ensure_input(token, logfn=None):
     if f:
         return f
     tmp = os.path.join(os.path.dirname(MASTER_DB), "_universal_tpl.xlsx")
-    wb = Workbook(); ws = wb.active; ws.title = "Companies"; ws.append(["Company"])
+    wb = Workbook(); ws = wb.active; ws.title = "Companies"
+    ws.append(["Company", "Website"])
+    # Add a short instruction row so anyone opening the file understands the columns
+    ws.append(["(paste company name here, one per row)",
+               "(optional: exact website like bcsconstructiongroup.com - improves accuracy)"])
     wb.save(tmp)
     fid = _drive_upload_to(token, os.environ["GDRIVE_INPUT_FOLDER"], tmp,
                            UNIVERSAL_INPUT_BASE + ".xlsx", XLSX_MIME)
     try: os.remove(tmp)
     except Exception: pass
     (logfn or log)(f"[universal] Created '{UNIVERSAL_INPUT_BASE}.xlsx' in the Input folder - "
-                   "open it and add company names under the 'Company' column.")
+                   "open it, put company names in the 'Company' column, and optionally put an "
+                   "exact website in 'Website' (e.g. bcsconstructiongroup.com) for stricter matching.")
     return {"id": fid, "name": UNIVERSAL_INPUT_BASE + ".xlsx", "mimeType": XLSX_MIME,
             "modifiedTime": "1970-01-01T00:00:00Z"}
 
@@ -1126,7 +1187,8 @@ def scan_universal_once(api_key, logfn=None, max_contacts=None):
     say(f"[universal] input has {len(companies)} company name(s) total.")
 
     fid, rows, processed = _universal_load_output(token)
-    new = [c for c in companies if _norm(c) not in processed]
+    # companies is now a list of (name, domain) tuples
+    new = [(c, d) for (c, d) in companies if _norm(c) not in processed]
     if not new:
         # remember state so future scans can skip the download until input changes again
         _UNIVERSAL_STATE.update({"input_mtime": input_mtime, "processed": processed,
@@ -1152,16 +1214,18 @@ def scan_universal_once(api_key, logfn=None, max_contacts=None):
     sync_master_before_run()
     headers = auth_headers(api_key)
     done = 0
-    for company in this_batch:
+    for company, domain in this_batch:
         try:
             crows, kind = process_company(company, headers,
-                                          max_contacts=max_contacts or MAX_CONTACTS_PER_COMPANY)
+                                          max_contacts=max_contacts or MAX_CONTACTS_PER_COMPANY,
+                                          company_domain=domain)
         except Exception as e:
             crows, kind = [note_row(company, f"ERROR: {e}")], "error"
         rows.extend(crows)
         processed.add(_norm(company))
         done += 1
         say(f"[universal] {done}/{len(this_batch)} {company}"
+            + (f" [{domain}]" if domain else "")
             + (" (from master, free)" if kind == "cached" else ""))
 
     fid = _universal_write_output(token, fid, rows, processed)
@@ -1254,10 +1318,11 @@ def main():
     companies = load_companies(args.input)
     log(f"Loaded {len(companies)} companies.")
     all_rows = []
-    for i, company in enumerate(companies, 1):
-        log(f"[{i}/{len(companies)}] {company}")
+    for i, (company, domain) in enumerate(companies, 1):
+        log(f"[{i}/{len(companies)}] {company}" + (f" ({domain})" if domain else ""))
         try:
-            rows, kind = process_company(company, headers, max_contacts=args.max_contacts)
+            rows, kind = process_company(company, headers, max_contacts=args.max_contacts,
+                                         company_domain=domain)
         except Exception as e:
             rows = [note_row(company, f"ERROR: {e}")]
         all_rows.extend(rows)

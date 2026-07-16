@@ -171,7 +171,8 @@ def run_job(job_id, input_path, api_key, cfg):
     results_by_company = {}
     counters = {"done": 0, "found": 0, "nomatch": 0, "errors": 0, "contacts": 0, "cached": 0}
 
-    def work(company):
+    def work(item):
+        company, domain = item
         try:
             rows, kind = core.process_company(company, headers,
                                               search_limit=cfg["search_limit"],
@@ -179,13 +180,14 @@ def run_job(job_id, input_path, api_key, cfg):
                                               poll_attempts=cfg["poll_attempts"],
                                               min_rank=cfg["min_rank"],
                                               max_contacts=cfg["max_contacts"],
-                                              preview=preview)
+                                              preview=preview,
+                                              company_domain=domain)
             return company, rows, kind
         except Exception as e:
             return company, [core.note_row(company, f"ERROR: {e}")], "error"
 
     with ThreadPoolExecutor(max_workers=cfg["workers"]) as ex:
-        futures = {ex.submit(work, c): c for c in companies}
+        futures = {ex.submit(work, item): item[0] for item in companies}
         for fut in as_completed(futures):
             company, rows, kind = fut.result()
             results_by_company[company] = rows
@@ -205,16 +207,16 @@ def run_job(job_id, input_path, api_key, cfg):
             src_tag = ' (from cache - free)' if kind == 'cached' else ''
             add_log(f"[{counters['done']}/{len(companies)}] {company} - "
                     f"{n if n else 'no'} contact(s) {'previewed' if preview else 'found'}{src_tag}")
-            # incremental save in input order
+            # incremental save in input order (companies is list of (name,domain) tuples)
             ordered = []
-            for c in companies:
+            for c, _ in companies:
                 if c in results_by_company:
                     ordered.extend(results_by_company[c])
             try: core.write_xlsx(ordered, out_path)
             except Exception: pass
 
     ordered = []
-    for c in companies:
+    for c, _ in companies:
         ordered.extend(results_by_company.get(c, []))
     core.write_xlsx(ordered, out_path)
 
