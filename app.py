@@ -383,10 +383,11 @@ def export_master():
 @app.route("/master-stats")
 @login_required
 def master_stats():
+    # Instant response - just report the local cache count. The scheduled watcher
+    # already keeps the local cache synced with the Drive master, so we don't need
+    # to redo that expensive Drive round trip on every page load (doing so used to
+    # timeout the Gunicorn worker when Google was slow).
     try:
-        # reflect the permanent Drive master, not just this instance's local cache
-        if core.drive_enabled():
-            core.sync_master_before_run()
         return jsonify(core.cache_stats())
     except Exception as e:
         return jsonify(error=str(e)), 500
