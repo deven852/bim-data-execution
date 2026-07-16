@@ -1132,14 +1132,27 @@ def scan_universal_once(api_key, logfn=None, max_contacts=None):
         _UNIVERSAL_STATE.update({"input_mtime": input_mtime, "processed": processed,
                                  "checked_at": time.time()})
         return []
-    capped = len(new) > AUTO_MAX_COMPANIES
+
+    # CHUNKING for the free tier's memory ceiling: process just a few companies per
+    # scan cycle, save immediately, then let the NEXT scan pick up where we left off.
+    # A larger batch would try to hold too much in RAM at once and get the worker
+    # killed. Set UNIVERSAL_CHUNK_SIZE higher (e.g. 5-10) on paid tiers.
+    chunk_size = int(os.environ.get("UNIVERSAL_CHUNK_SIZE", "2"))
+    total_pending = len(new)
+    capped_by_safety = len(new) > AUTO_MAX_COMPANIES
     new = new[:AUTO_MAX_COMPANIES]
-    say(f"[universal] {len(new)} new company(ies) detected" + (" (CAPPED)" if capped else "") + ".")
+    this_batch = new[:chunk_size]
+    remaining_after = len(new) - len(this_batch)
+    say(f"[universal] {total_pending} new company(ies) pending"
+        + (" (CAPPED)" if capped_by_safety else "")
+        + f". Processing {len(this_batch)} this cycle; "
+        + (f"{remaining_after} more will run on the next scan(s)." if remaining_after
+           else "this is the last chunk."))
 
     sync_master_before_run()
     headers = auth_headers(api_key)
     done = 0
-    for company in new:
+    for company in this_batch:
         try:
             crows, kind = process_company(company, headers,
                                           max_contacts=max_contacts or MAX_CONTACTS_PER_COMPANY)
@@ -1148,11 +1161,24 @@ def scan_universal_once(api_key, logfn=None, max_contacts=None):
         rows.extend(crows)
         processed.add(_norm(company))
         done += 1
-        say(f"[universal] {done}/{len(new)} {company}"
+        say(f"[universal] {done}/{len(this_batch)} {company}"
             + (" (from master, free)" if kind == "cached" else ""))
 
     fid = _universal_write_output(token, fid, rows, processed)
     sync_master_after_run()
+    # Don't mark input_mtime as fully "handled" while there are still companies pending
+    # - that way the NEXT scan cycle picks them up automatically.
+    if remaining_after:
+        say(f"[universal] chunk done - {remaining_after} company(ies) still to go, "
+            f"they will process on the next scan.")
+        # leave input_mtime unchanged in state so we re-enter the loop next scan
+        _UNIVERSAL_STATE.update({"processed": processed, "checked_at": time.time()})
+    else:
+        _UNIVERSAL_STATE.update({"input_mtime": input_mtime, "processed": processed,
+                                 "checked_at": time.time()})
+        say(f"[universal] ALL DONE - {len(rows)} contact rows in {UNIVERSAL_OUTPUT_NAME}.")
+    return [{"new_companies": done, "output": UNIVERSAL_OUTPUT_NAME,
+             "capped": capped_by_safety, "remaining": remaining_after}]
     # Update fast-path state to the current mtime so we don't re-scan until input changes
     _UNIVERSAL_STATE.update({"input_mtime": input_mtime, "processed": processed,
                              "checked_at": time.time()})
