@@ -1,7 +1,1 @@
-__pycache__/
-*.pyc
-uploads/
-outputs/
-bim_master.db
-*.xlsx
-.env
+get_drive_token.py
