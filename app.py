@@ -521,16 +521,12 @@ PAGE = r"""<!doctype html>
     --bg-0:#050704; --bg-1:#0a0d08; --bg-2:#141a0f; --bg-3:#1a2016;
     --olive-1:#6b8020; --olive-2:#8ca83c; --olive-3:#b8c95a; --olive-4:#d4e17a;
     --ink:#e8ecdc; --ink-2:#d4d8c8; --muted:#8a9070; --muted-2:#5a6045;
-    --err:#a34848; --err-bg:rgba(163,72,72,.1);
-    --ok:#b8c95a; --ok-bg:rgba(184,201,90,.08);
-    --line:rgba(184,201,90,.15); --line-2:rgba(184,201,90,.28);
-    --glow:0 0 20px rgba(184,201,90,.4);
-    --glow-strong:0 0 35px rgba(184,201,90,.7), 0 0 70px rgba(140,168,60,.35);
+    --err:#a34848; --line:rgba(184,201,90,.15); --line-2:rgba(184,201,90,.28);
   }
   *{box-sizing:border-box}
   html,body{margin:0;padding:0}
   body{
-    background:var(--bg-1);
+    background:var(--bg-0);
     color:var(--ink-2);
     font-family:"Inter",system-ui,sans-serif;
     line-height:1.5;
@@ -540,84 +536,94 @@ PAGE = r"""<!doctype html>
     position:relative;
   }
 
-  /* Animated background orbs */
-  body::before, body::after{
-    content:""; position:fixed; border-radius:50%; pointer-events:none; z-index:0;
-    filter:blur(70px);
-  }
-  body::before{
-    top:-150px; left:-150px; width:500px; height:500px;
-    background:radial-gradient(circle,rgba(140,168,60,.25) 0%,transparent 70%);
-    animation:orbFloat1 18s ease-in-out infinite;
-  }
-  body::after{
-    bottom:-200px; right:-150px; width:600px; height:600px;
-    background:radial-gradient(circle,rgba(184,201,90,.18) 0%,transparent 70%);
-    animation:orbFloat2 22s ease-in-out infinite;
-  }
-
-  /* Grid overlay */
-  .grid-bg{
-    position:fixed; inset:0; pointer-events:none; z-index:1;
-    background:
-      linear-gradient(rgba(140,168,60,.05) 1px,transparent 1px) 0 0/32px 32px,
-      linear-gradient(90deg,rgba(140,168,60,.05) 1px,transparent 1px) 0 0/32px 32px;
-    opacity:.6;
-    mask-image:radial-gradient(ellipse at center,black 30%,transparent 85%);
-    -webkit-mask-image:radial-gradient(ellipse at center,black 30%,transparent 85%);
-  }
+  /* Aurora backgrounds - no grid */
+  .aurora{ position:fixed; border-radius:50%; filter:blur(90px); pointer-events:none; mix-blend-mode:screen; z-index:0; }
+  .a1{ top:-200px; left:-150px; width:600px; height:600px; background:radial-gradient(circle,#8ca83c 0%,transparent 65%); opacity:.5; animation:auroraFlow1 22s ease-in-out infinite; }
+  .a2{ bottom:-200px; right:-150px; width:700px; height:700px; background:radial-gradient(circle,#b8c95a 0%,transparent 65%); opacity:.35; animation:auroraFlow2 26s ease-in-out infinite; }
+  .a3{ top:40%; left:35%; width:400px; height:400px; background:radial-gradient(circle,#d4e17a 0%,transparent 70%); opacity:.2; animation:auroraFlow3 19s ease-in-out infinite; }
 
   /* Floating particles */
-  .particle{ position:fixed; border-radius:50%; background:var(--olive-3); box-shadow:0 0 12px var(--olive-3); z-index:1; pointer-events:none; }
-  .p1{ width:3px; height:3px; top:15%; left:8%;  animation:drift1 14s ease-in-out infinite; }
-  .p2{ width:4px; height:4px; top:35%; left:92%; animation:drift2 17s ease-in-out infinite; }
-  .p3{ width:3px; height:3px; top:70%; left:12%; animation:drift1 11s ease-in-out infinite reverse; }
-  .p4{ width:2px; height:2px; top:25%; left:70%; animation:drift2 16s ease-in-out infinite; }
-  .p5{ width:4px; height:4px; top:82%; left:55%; animation:drift1 19s ease-in-out infinite; }
-  .p6{ width:3px; height:3px; top:20%; left:85%; animation:drift2 13s ease-in-out infinite reverse; }
-  .p7{ width:2px; height:2px; top:55%; left:30%; animation:drift1 15s ease-in-out infinite; }
+  .particle{ position:fixed; border-radius:50%; background:var(--olive-3); box-shadow:0 0 10px var(--olive-3), 0 0 20px rgba(184,201,90,.4); z-index:1; pointer-events:none; }
+  .p1{ width:3px; height:3px; top:12%; left:8%;  animation:drift1 14s ease-in-out infinite; }
+  .p2{ width:4px; height:4px; top:28%; left:92%; animation:drift2 17s ease-in-out infinite; }
+  .p3{ width:2px; height:2px; top:65%; left:15%; animation:drift1 11s ease-in-out infinite reverse; }
+  .p4{ width:3px; height:3px; top:22%; left:70%; animation:drift2 16s ease-in-out infinite; }
+  .p5{ width:4px; height:4px; top:80%; left:60%; animation:drift1 19s ease-in-out infinite; }
+  .p6{ width:2px; height:2px; top:18%; left:45%; animation:drift2 13s ease-in-out infinite reverse; }
+  .p7{ width:3px; height:3px; top:55%; left:88%; animation:drift1 15s ease-in-out infinite; }
+  .p8{ width:2px; height:2px; top:75%; left:30%; animation:drift2 12s ease-in-out infinite; }
 
   .wrap{ max-width:860px; margin:0 auto; padding:44px 24px 90px; position:relative; z-index:2; }
 
-  header{ display:flex; align-items:center; gap:32px; border-bottom:1px solid var(--line); padding-bottom:28px; margin-bottom:32px; }
-
-  /* True 3D CSS Cube */
-  .cube-scene{ perspective:1000px; width:130px; height:130px; flex:0 0 auto; animation:cubeGlow 4s ease-in-out infinite; }
-  .cube-3d{ position:relative; width:100%; height:100%; transform-style:preserve-3d; animation:cubeRotate 18s linear infinite; }
-  .cube-face{
-    position:absolute; width:130px; height:130px;
-    border:1.5px solid var(--olive-3);
-    background:linear-gradient(135deg,rgba(140,168,60,.15),rgba(184,201,90,.08));
-    backdrop-filter:blur(4px);
-  }
-  .f-front  { transform:translateZ(65px); }
-  .f-back   { transform:translateZ(-65px) rotateY(180deg); }
-  .f-right  { transform:rotateY(90deg) translateZ(65px); }
-  .f-left   { transform:rotateY(-90deg) translateZ(65px); }
-  .f-top    { transform:rotateX(90deg) translateZ(65px); background:linear-gradient(135deg,rgba(184,201,90,.25),rgba(140,168,60,.12)); }
-  .f-bottom { transform:rotateX(-90deg) translateZ(65px); }
-
+  /* HERO with hierarchy visual */
+  .hero{ display:flex; align-items:center; gap:40px; margin-bottom:24px; }
+  .hero-viz{ width:260px; height:280px; flex:0 0 auto; position:relative; animation:coreGlow 4s ease-in-out infinite; }
+  .hero-text{ flex:1; min-width:0; }
   .eyebrow{
     font-family:"JetBrains Mono",monospace;
-    font-size:11px; letter-spacing:.28em; text-transform:uppercase;
+    font-size:11px; letter-spacing:.3em; text-transform:uppercase;
     color:var(--olive-3);
     text-shadow:0 0 20px rgba(184,201,90,.5);
   }
+  .eyebrow .dot{
+    display:inline-block; width:8px; height:8px; border-radius:50%;
+    background:var(--olive-3); box-shadow:0 0 12px var(--olive-3);
+    animation:livePulse 1.6s ease-in-out infinite;
+    vertical-align:middle; margin-right:8px;
+  }
   h1{
     font-family:"Space Grotesk",sans-serif;
-    font-weight:700; font-size:40px; letter-spacing:-.02em;
-    margin:8px 0 6px;
-    background:linear-gradient(120deg,#ffffff 0%,var(--olive-4) 50%,var(--olive-3) 100%);
+    font-weight:700; font-size:44px; letter-spacing:-.02em;
+    margin:10px 0 10px; line-height:1.05;
+    background:linear-gradient(120deg,#ffffff 0%,var(--olive-4) 45%,var(--olive-3) 100%);
     -webkit-background-clip:text; background-clip:text;
     -webkit-text-fill-color:transparent; color:transparent;
   }
-  .sub{ color:var(--muted); font-size:14px; max-width:58ch; margin:0; line-height:1.6; }
+  .sub{ color:var(--muted); font-size:14px; max-width:46ch; margin:0 0 16px; line-height:1.6; }
   .sub b{ color:var(--olive-3); font-weight:500; }
 
-  /* Master store row */
+  /* Tier badges */
+  .tiers{ display:flex; gap:10px; flex-wrap:wrap; }
+  .tier-badge{
+    display:inline-flex; align-items:center; gap:6px;
+    padding:5px 11px; border-radius:99px;
+    font-family:"JetBrains Mono",monospace; font-size:10.5px;
+    animation:tierGlow 3s ease-in-out infinite;
+  }
+  .tier-badge .bullet{ width:6px; height:6px; border-radius:50%; }
+  .tier-active{ background:rgba(212,225,122,.08); border:1px solid rgba(212,225,122,.3); color:var(--olive-4); }
+  .tier-active .bullet{ background:var(--olive-4); box-shadow:0 0 10px var(--olive-4); animation:activeDot 1.5s ease-in-out infinite; }
+  .tier-cached{ background:rgba(184,201,90,.08); border:1px solid rgba(184,201,90,.3); color:var(--olive-3); animation-delay:1s; }
+  .tier-cached .bullet{ background:var(--olive-3); box-shadow:0 0 8px var(--olive-3); }
+  .tier-dim{ background:rgba(140,168,60,.05); border:1px solid rgba(140,168,60,.2); color:var(--muted); animation:none; }
+  .tier-dim .bullet{ background:#3d4a12; }
+
+  /* Live ticker */
+  .ticker-wrap{
+    overflow:hidden; margin:20px 0 28px; padding:12px 0;
+    border-top:1px solid var(--line); border-bottom:1px solid var(--line);
+    position:relative;
+  }
+  .ticker-wrap::before, .ticker-wrap::after{
+    content:""; position:absolute; top:0; bottom:0; width:80px;
+    z-index:2; pointer-events:none;
+  }
+  .ticker-wrap::before{ left:0; background:linear-gradient(90deg,var(--bg-0),transparent); }
+  .ticker-wrap::after{ right:0; background:linear-gradient(270deg,var(--bg-0),transparent); }
+  .ticker{
+    display:flex; gap:48px; white-space:nowrap;
+    animation:tickerScroll 40s linear infinite;
+    font-family:"JetBrains Mono",monospace; font-size:12.5px;
+  }
+  .ticker-item{ color:var(--muted); }
+  .ticker-item .num{ color:var(--olive-3); font-weight:500; }
+  .ticker-item .company{ color:var(--ink-2); }
+  .ticker-sep{ color:rgba(184,201,90,.25); }
+
+  /* Master store bar */
   #masterbar{
     display:flex; align-items:center; gap:14px;
-    margin:0 0 28px;
+    margin:0 0 24px;
     font-family:"JetBrains Mono",monospace; font-size:12px; color:var(--muted);
   }
   #masterbar .dot{
@@ -640,9 +646,7 @@ PAGE = r"""<!doctype html>
     border-radius:6px;
     backdrop-filter:blur(10px);
     margin-bottom:22px;
-    transition:border-color .3s;
   }
-  .card:hover{ border-color:var(--line-2); }
   .card-h{ display:flex; align-items:center; gap:12px; padding:16px 22px; border-bottom:1px solid var(--line); }
   .card-h .n{
     font-family:"JetBrains Mono",monospace; font-size:11px; color:var(--olive-3);
@@ -661,7 +665,6 @@ PAGE = r"""<!doctype html>
     padding:3px 10px; border-radius:3px;
   }
 
-  /* Form fields */
   label{
     display:block;
     font-family:"JetBrains Mono",monospace;
@@ -672,15 +675,13 @@ PAGE = r"""<!doctype html>
   .fld:last-child{ margin-bottom:0; }
   input[type=text],input[type=password],input[type=number],select{
     width:100%; padding:11px 14px;
-    border:1px solid var(--line);
-    border-radius:3px;
+    border:1px solid var(--line); border-radius:3px;
     font-family:"JetBrains Mono",monospace; font-size:13px;
     background:var(--bg-2); color:var(--ink);
     transition:all .2s;
   }
   input:focus,select:focus{
-    outline:none;
-    border-color:var(--olive-3);
+    outline:none; border-color:var(--olive-3);
     box-shadow:0 0 0 3px rgba(184,201,90,.15);
   }
   select{ cursor:pointer; }
@@ -697,13 +698,10 @@ PAGE = r"""<!doctype html>
   .hint b{ color:var(--ink-2); font-weight:500; }
   .grid2{ display:grid; grid-template-columns:1fr 1fr; gap:18px; }
 
-  /* Drop zone */
   .drop{
-    border:1.5px dashed var(--line-2);
-    border-radius:6px;
+    border:1.5px dashed var(--line-2); border-radius:6px;
     padding:38px 22px; text-align:center; cursor:pointer;
-    background:rgba(184,201,90,.02);
-    transition:all .25s;
+    background:rgba(184,201,90,.02); transition:all .25s;
   }
   .drop:hover, .drop.hot{
     border-color:var(--olive-3);
@@ -715,40 +713,32 @@ PAGE = r"""<!doctype html>
   .fname{ margin-top:14px; font-family:"JetBrains Mono",monospace; font-size:13px; color:var(--olive-3); }
   input[type=file]{ display:none; }
 
-  /* Run buttons */
   button.run{
     padding:16px; border:0; border-radius:3px; cursor:pointer;
-    font-family:"Space Grotesk",sans-serif; font-weight:600; font-size:15px; letter-spacing:.01em;
-    transition:all .3s;
-    position:relative;
-    overflow:hidden;
+    font-family:"Space Grotesk",sans-serif; font-weight:600; font-size:15px;
+    transition:all .3s; position:relative; overflow:hidden;
   }
   button.run.primary{
     background:linear-gradient(135deg,var(--olive-2) 0%,var(--olive-3) 100%);
-    color:var(--bg-0);
-    box-shadow:0 4px 20px rgba(184,201,90,.3);
+    color:var(--bg-0); box-shadow:0 4px 20px rgba(184,201,90,.3);
   }
   button.run.primary:hover:not(:disabled){
-    transform:translateY(-2px);
-    box-shadow:0 8px 30px rgba(184,201,90,.5);
+    transform:translateY(-2px); box-shadow:0 8px 30px rgba(184,201,90,.5);
   }
   button.run.ghost-btn{
     background:transparent; color:var(--olive-3);
     border:1px solid var(--line-2);
   }
   button.run.ghost-btn:hover:not(:disabled){
-    background:rgba(184,201,90,.08);
-    border-color:var(--olive-3);
+    background:rgba(184,201,90,.08); border-color:var(--olive-3);
   }
   button.run:disabled{ opacity:.35; cursor:not-allowed; }
   .msg{ margin-top:14px; font-size:13.5px; color:var(--err); min-height:1em; }
 
-  /* Stats */
   .stats{ display:grid; grid-template-columns:repeat(5,1fr); gap:12px; margin-bottom:18px; }
   .stat{
     background:linear-gradient(145deg,rgba(20,26,15,.9),rgba(15,20,10,.7));
-    border:1px solid var(--line);
-    border-radius:6px; padding:16px;
+    border:1px solid var(--line); border-radius:6px; padding:16px;
     backdrop-filter:blur(10px);
     transition:all .4s cubic-bezier(.34,1.56,.64,1);
   }
@@ -759,8 +749,7 @@ PAGE = r"""<!doctype html>
   }
   .stat .v{
     font-family:"Space Grotesk",sans-serif; font-weight:700; font-size:30px; line-height:1;
-    color:var(--ink);
-    transition:all .3s;
+    color:var(--ink); transition:all .3s;
   }
   .stat .k{
     font-family:"JetBrains Mono",monospace; font-size:10px;
@@ -772,20 +761,16 @@ PAGE = r"""<!doctype html>
   .stat.err .v{ color:var(--err); }
   .stat .v.bump{ animation:numberPop .7s cubic-bezier(.34,1.56,.64,1); }
 
-  /* Progress */
   .barwrap{
-    height:10px;
-    background:rgba(184,201,90,.08);
-    border:1px solid var(--line);
-    border-radius:99px; overflow:hidden;
+    height:10px; background:rgba(184,201,90,.08);
+    border:1px solid var(--line); border-radius:99px; overflow:hidden;
   }
   .bar{
     height:100%; width:0;
     background:linear-gradient(90deg,var(--olive-1) 0%,var(--olive-3) 40%,var(--olive-4) 50%,var(--olive-3) 60%,var(--olive-1) 100%);
     background-size:200% 100%;
     animation:shimmerFlow 2.5s linear infinite;
-    box-shadow:0 0 20px rgba(184,201,90,.5);
-    border-radius:99px;
+    box-shadow:0 0 20px rgba(184,201,90,.5); border-radius:99px;
     transition:width .5s cubic-bezier(.16,1,.3,1);
   }
   .meta{ display:flex; justify-content:space-between; margin:12px 0 18px; font-family:"JetBrains Mono",monospace; font-size:12px; color:var(--muted); }
@@ -793,12 +778,9 @@ PAGE = r"""<!doctype html>
   .meta .companyname{ color:var(--ink-2); }
   .meta .count{ color:var(--olive-3); }
 
-  /* Console */
   .console{
-    background:var(--bg-0);
-    border:1px solid var(--line);
-    color:#a8b090;
-    border-radius:6px;
+    background:var(--bg-0); border:1px solid var(--line);
+    color:#a8b090; border-radius:6px;
     padding:18px; height:320px; overflow:auto;
     font-family:"JetBrains Mono",monospace; font-size:12.5px; line-height:1.75;
     white-space:pre-wrap; word-break:break-word;
@@ -811,7 +793,6 @@ PAGE = r"""<!doctype html>
   .console .hi{ color:var(--olive-4); }
   .console > div{ animation:fadeSlide .5s cubic-bezier(.16,1,.3,1); }
 
-  /* Done card */
   .done{
     margin-top:22px; border:1px solid var(--olive-3);
     border-radius:6px; padding:20px;
@@ -826,52 +807,158 @@ PAGE = r"""<!doctype html>
     padding:12px 20px; border-radius:3px;
     font-family:"Space Grotesk",sans-serif; font-size:14px; font-weight:600;
     white-space:nowrap;
-    box-shadow:0 4px 20px rgba(184,201,90,.3);
-    transition:all .2s;
+    box-shadow:0 4px 20px rgba(184,201,90,.3); transition:all .2s;
   }
   .done a:hover{ transform:translateY(-2px); box-shadow:0 8px 30px rgba(184,201,90,.5); }
   .hidden{ display:none; }
 
   /* Animations */
-  @keyframes cubeRotate{ from{transform:rotateX(-20deg) rotateY(0deg);} to{transform:rotateX(-20deg) rotateY(360deg);} }
-  @keyframes cubeGlow{ 0%,100%{filter:drop-shadow(0 0 20px rgba(184,201,90,.4)) drop-shadow(0 0 40px rgba(140,168,60,.2));} 50%{filter:drop-shadow(0 0 35px rgba(184,201,90,.7)) drop-shadow(0 0 70px rgba(140,168,60,.4));} }
-  @keyframes orbFloat1{ 0%,100%{transform:translate(0,0) scale(1);} 50%{transform:translate(80px,60px) scale(1.15);} }
-  @keyframes orbFloat2{ 0%,100%{transform:translate(0,0) scale(1);} 50%{transform:translate(-60px,-40px) scale(1.1);} }
-  @keyframes livePulse{ 0%,100%{opacity:1;transform:scale(1);} 50%{opacity:.5;transform:scale(1.2);} }
-  @keyframes shimmerFlow{ 0%{background-position:-200% 0;} 100%{background-position:200% 0;} }
-  @keyframes numberPop{ 0%{transform:translateY(15px) scale(.8);opacity:.4;} 60%{transform:translateY(-3px) scale(1.08);} 100%{transform:translateY(0) scale(1);opacity:1;} }
-  @keyframes fadeSlide{ from{opacity:0;transform:translateX(-15px);} to{opacity:1;transform:translateX(0);} }
-  @keyframes drift1{ 0%,100%{transform:translate(0,0);opacity:.4;} 50%{transform:translate(30px,-40px);opacity:.8;} }
-  @keyframes drift2{ 0%,100%{transform:translate(0,0);opacity:.3;} 50%{transform:translate(-40px,-30px);opacity:.7;} }
+  @keyframes auroraFlow1 { 0%,100%{transform:translate(0,0) scale(1);} 50%{transform:translate(120px,80px) scale(1.2);} }
+  @keyframes auroraFlow2 { 0%,100%{transform:translate(0,0) scale(1);} 50%{transform:translate(-150px,100px) scale(1.3);} }
+  @keyframes auroraFlow3 { 0%,100%{transform:translate(0,0) scale(1);} 50%{transform:translate(200px,-100px) scale(1.15);} }
+  @keyframes coreGlow { 0%,100%{filter:drop-shadow(0 0 15px rgba(184,201,90,.6));} 50%{filter:drop-shadow(0 0 30px rgba(184,201,90,.9)) drop-shadow(0 0 60px rgba(140,168,60,.5));} }
+  @keyframes livePulse { 0%,100%{opacity:1;transform:scale(1);} 50%{opacity:.5;transform:scale(1.2);} }
+  @keyframes shimmerFlow { 0%{background-position:-200% 0;} 100%{background-position:200% 0;} }
+  @keyframes numberPop { 0%{transform:translateY(15px) scale(.8);opacity:.4;} 60%{transform:translateY(-3px) scale(1.08);} 100%{transform:translateY(0) scale(1);opacity:1;} }
+  @keyframes fadeSlide { from{opacity:0;transform:translateX(-15px);} to{opacity:1;transform:translateX(0);} }
+  @keyframes drift1 { 0%,100%{transform:translate(0,0);opacity:.4;} 50%{transform:translate(30px,-40px);opacity:.8;} }
+  @keyframes drift2 { 0%,100%{transform:translate(0,0);opacity:.3;} 50%{transform:translate(-40px,-30px);opacity:.7;} }
+  @keyframes tierGlow { 0%,100%{box-shadow:0 0 10px rgba(184,201,90,.15);} 50%{box-shadow:0 0 20px rgba(184,201,90,.4);} }
+  @keyframes tickerScroll { 0%{transform:translateX(0);} 100%{transform:translateX(-50%);} }
+  @keyframes activePing { 0%{transform:scale(1);opacity:.8;} 100%{transform:scale(3.5);opacity:0;} }
+  @keyframes activeDot { 0%,100%{transform:scale(1);filter:drop-shadow(0 0 6px #d4e17a);} 50%{transform:scale(1.3);filter:drop-shadow(0 0 12px #d4e17a) drop-shadow(0 0 20px #d4e17a);} }
+  @keyframes dimTwinkle { 0%,100%{opacity:.25;} 50%{opacity:.5;} }
+  @keyframes brightTwinkle { 0%,100%{opacity:.85;} 50%{opacity:1;} }
 
-  @media (max-width:620px){ .grid2,.stats{ grid-template-columns:1fr 1fr; } h1{font-size:32px;} .cube-scene{width:100px;height:100px;} .cube-face{width:100px;height:100px;} .f-front{transform:translateZ(50px);}.f-back{transform:translateZ(-50px) rotateY(180deg);}.f-right{transform:rotateY(90deg) translateZ(50px);}.f-left{transform:rotateY(-90deg) translateZ(50px);}.f-top{transform:rotateX(90deg) translateZ(50px);}.f-bottom{transform:rotateX(-90deg) translateZ(50px);} }
+  /* Cluster dots */
+  .cluster-dot { transform-origin: center; transform-box: fill-box; }
+  .dim { fill:#3d4a12; animation:dimTwinkle 4s ease-in-out infinite; }
+  .cached { fill:#b8c95a; filter:drop-shadow(0 0 3px rgba(184,201,90,.6)); animation:brightTwinkle 3s ease-in-out infinite; }
+  .active { fill:#d4e17a; animation:activeDot 1.5s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+  .active-ring { fill:none; stroke:#d4e17a; stroke-width:1; transform-box: fill-box; transform-origin: center; animation:activePing 2s ease-out infinite; }
+
+  @media (max-width:720px){
+    .hero{ flex-direction:column; text-align:center; }
+    .stats{ grid-template-columns:repeat(3,1fr); }
+    .grid2{ grid-template-columns:1fr; }
+    h1{ font-size:32px; }
+    .hero-viz{ width:220px; height:250px; }
+  }
   @media (prefers-reduced-motion:reduce){ *,*::before,*::after{ animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; } }
 </style>
 </head>
 <body>
 
-<div class="grid-bg"></div>
+<div class="aurora a1"></div>
+<div class="aurora a2"></div>
+<div class="aurora a3"></div>
 <div class="particle p1"></div><div class="particle p2"></div><div class="particle p3"></div>
-<div class="particle p4"></div><div class="particle p5"></div><div class="particle p6"></div><div class="particle p7"></div>
+<div class="particle p4"></div><div class="particle p5"></div><div class="particle p6"></div>
+<div class="particle p7"></div><div class="particle p8"></div>
 
 <div class="wrap">
-  <header>
-    <div class="cube-scene" aria-hidden="true">
-      <div class="cube-3d">
-        <div class="cube-face f-front"></div>
-        <div class="cube-face f-back"></div>
-        <div class="cube-face f-right"></div>
-        <div class="cube-face f-left"></div>
-        <div class="cube-face f-top"></div>
-        <div class="cube-face f-bottom"></div>
+
+  <!-- HERO with hierarchy visualization -->
+  <div class="hero">
+    <div class="hero-viz" aria-hidden="true">
+      <svg width="260" height="280" viewBox="0 0 260 280" style="overflow:visible;">
+        <!-- 71 company dots + 1 active. Bright = cached (free reuse), dim = not yet mapped -->
+          <circle class="cluster-dot dim" cx="22" cy="26" r="3" style="animation-delay:0.0s"/>
+          <circle class="cluster-dot cached" cx="51" cy="29" r="3" style="animation-delay:0.08s"/>
+          <circle class="cluster-dot cached" cx="76" cy="34" r="3" style="animation-delay:0.16s"/>
+          <circle class="cluster-dot cached" cx="108" cy="26" r="3" style="animation-delay:0.24s"/>
+          <circle class="cluster-dot cached" cx="132" cy="29" r="3" style="animation-delay:0.32s"/>
+          <circle class="cluster-dot cached" cx="156" cy="34" r="3" style="animation-delay:0.4s"/>
+          <circle class="cluster-dot cached" cx="191" cy="32" r="3" style="animation-delay:0.48s"/>
+          <circle class="cluster-dot dim" cx="214" cy="26" r="3" style="animation-delay:0.56s"/>
+          <circle class="cluster-dot cached" cx="239" cy="32" r="3" style="animation-delay:0.64s"/>
+          <circle class="cluster-dot dim" cx="23" cy="59" r="3" style="animation-delay:0.72s"/>
+          <circle class="cluster-dot cached" cx="53" cy="57" r="3" style="animation-delay:0.8s"/>
+          <circle class="cluster-dot dim" cx="76" cy="61" r="3" style="animation-delay:0.88s"/>
+          <circle class="cluster-dot dim" cx="106" cy="56" r="3" style="animation-delay:0.96s"/>
+          <circle class="cluster-dot dim" cx="137" cy="57" r="3" style="animation-delay:1.04s"/>
+          <circle class="cluster-dot cached" cx="162" cy="57" r="3" style="animation-delay:1.12s"/>
+          <circle class="cluster-dot cached" cx="188" cy="59" r="3" style="animation-delay:1.2s"/>
+          <circle class="cluster-dot dim" cx="210" cy="59" r="3" style="animation-delay:1.28s"/>
+          <circle class="cluster-dot dim" cx="238" cy="59" r="3" style="animation-delay:1.36s"/>
+          <circle class="cluster-dot cached" cx="27" cy="90" r="3" style="animation-delay:1.44s"/>
+          <circle class="cluster-dot cached" cx="53" cy="88" r="3" style="animation-delay:1.52s"/>
+          <circle class="cluster-dot cached" cx="78" cy="90" r="3" style="animation-delay:1.6s"/>
+          <circle class="cluster-dot cached" cx="103" cy="88" r="3" style="animation-delay:1.68s"/>
+          <circle class="cluster-dot cached" cx="132" cy="88" r="3" style="animation-delay:1.76s"/>
+          <circle class="cluster-dot cached" cx="160" cy="94" r="3" style="animation-delay:1.84s"/>
+          <circle class="cluster-dot cached" cx="188" cy="86" r="3" style="animation-delay:1.92s"/>
+          <circle class="cluster-dot cached" cx="210" cy="91" r="3" style="animation-delay:2.0s"/>
+          <circle class="cluster-dot dim" cx="238" cy="89" r="3" style="animation-delay:2.08s"/>
+          <circle class="cluster-dot cached" cx="26" cy="119" r="3" style="animation-delay:2.16s"/>
+          <circle class="cluster-dot cached" cx="54" cy="123" r="3" style="animation-delay:2.24s"/>
+          <circle class="cluster-dot dim" cx="77" cy="119" r="3" style="animation-delay:2.32s"/>
+          <circle class="cluster-dot dim" cx="110" cy="120" r="3" style="animation-delay:2.4s"/>
+          <circle class="cluster-dot dim" cx="161" cy="119" r="3" style="animation-delay:2.56s"/>
+          <circle class="cluster-dot cached" cx="185" cy="124" r="3" style="animation-delay:2.64s"/>
+          <circle class="cluster-dot cached" cx="210" cy="117" r="3" style="animation-delay:2.72s"/>
+          <circle class="cluster-dot cached" cx="239" cy="122" r="3" style="animation-delay:2.8s"/>
+          <circle class="cluster-dot cached" cx="27" cy="152" r="3" style="animation-delay:2.88s"/>
+          <circle class="cluster-dot cached" cx="55" cy="154" r="3" style="animation-delay:2.96s"/>
+          <circle class="cluster-dot cached" cx="83" cy="146" r="3" style="animation-delay:3.04s"/>
+          <circle class="cluster-dot dim" cx="103" cy="154" r="3" style="animation-delay:3.12s"/>
+          <circle class="cluster-dot cached" cx="134" cy="147" r="3" style="animation-delay:3.2s"/>
+          <circle class="cluster-dot cached" cx="158" cy="153" r="3" style="animation-delay:3.28s"/>
+          <circle class="cluster-dot dim" cx="187" cy="154" r="3" style="animation-delay:3.36s"/>
+          <circle class="cluster-dot dim" cx="218" cy="147" r="3" style="animation-delay:3.44s"/>
+          <circle class="cluster-dot cached" cx="241" cy="154" r="3" style="animation-delay:3.52s"/>
+          <circle class="cluster-dot dim" cx="23" cy="181" r="3" style="animation-delay:3.6s"/>
+          <circle class="cluster-dot dim" cx="56" cy="184" r="3" style="animation-delay:3.68s"/>
+          <circle class="cluster-dot cached" cx="80" cy="183" r="3" style="animation-delay:3.76s"/>
+          <circle class="cluster-dot cached" cx="107" cy="180" r="3" style="animation-delay:3.84s"/>
+          <circle class="cluster-dot cached" cx="132" cy="177" r="3" style="animation-delay:3.92s"/>
+          <circle class="cluster-dot dim" cx="163" cy="177" r="3" style="animation-delay:4.0s"/>
+          <circle class="cluster-dot cached" cx="191" cy="178" r="3" style="animation-delay:4.08s"/>
+          <circle class="cluster-dot cached" cx="217" cy="184" r="3" style="animation-delay:4.16s"/>
+          <circle class="cluster-dot dim" cx="245" cy="182" r="3" style="animation-delay:4.24s"/>
+          <circle class="cluster-dot cached" cx="29" cy="209" r="3" style="animation-delay:4.32s"/>
+          <circle class="cluster-dot cached" cx="54" cy="211" r="3" style="animation-delay:4.4s"/>
+          <circle class="cluster-dot cached" cx="83" cy="213" r="3" style="animation-delay:4.48s"/>
+          <circle class="cluster-dot cached" cx="105" cy="207" r="3" style="animation-delay:4.56s"/>
+          <circle class="cluster-dot cached" cx="137" cy="209" r="3" style="animation-delay:4.64s"/>
+          <circle class="cluster-dot cached" cx="156" cy="207" r="3" style="animation-delay:4.72s"/>
+          <circle class="cluster-dot cached" cx="183" cy="209" r="3" style="animation-delay:4.8s"/>
+          <circle class="cluster-dot cached" cx="210" cy="211" r="3" style="animation-delay:4.88s"/>
+          <circle class="cluster-dot cached" cx="240" cy="210" r="3" style="animation-delay:4.96s"/>
+          <circle class="cluster-dot cached" cx="24" cy="244" r="3" style="animation-delay:5.04s"/>
+          <circle class="cluster-dot dim" cx="55" cy="239" r="3" style="animation-delay:5.12s"/>
+          <circle class="cluster-dot cached" cx="81" cy="239" r="3" style="animation-delay:5.2s"/>
+          <circle class="cluster-dot cached" cx="108" cy="241" r="3" style="animation-delay:5.28s"/>
+          <circle class="cluster-dot cached" cx="136" cy="236" r="3" style="animation-delay:5.36s"/>
+          <circle class="cluster-dot cached" cx="157" cy="236" r="3" style="animation-delay:5.44s"/>
+          <circle class="cluster-dot cached" cx="188" cy="237" r="3" style="animation-delay:5.52s"/>
+          <circle class="cluster-dot cached" cx="213" cy="244" r="3" style="animation-delay:5.6s"/>
+          <circle class="cluster-dot cached" cx="243" cy="238" r="3" style="animation-delay:5.68s"/>
+        <!-- ACTIVE COMPANY - pulsing with expanding rings -->
+        <circle class="active-ring" cx="133" cy="120" r="5"/>
+        <circle class="active-ring" cx="133" cy="120" r="5" style="animation-delay:1s"/>
+        <circle class="cluster-dot active" cx="133" cy="120" r="4.5"/>
+      </svg>
+    </div>
+
+    <div class="hero-text">
+      <div class="eyebrow"><span class="dot"></span>BMSI &middot; LEAD GENERATION ENGINE</div>
+      <h1>BIM Data Execution</h1>
+      <p class="sub">Every dot is a company. <b>Bright dots are already mapped</b> - reusing them costs nothing. New runs light up more of the field.</p>
+      <div class="tiers">
+        <span class="tier-badge tier-active"><span class="bullet"></span>Processing now</span>
+        <span class="tier-badge tier-cached"><span class="bullet"></span>Cached &middot; free</span>
+        <span class="tier-badge tier-dim"><span class="bullet"></span>Not yet mapped</span>
       </div>
     </div>
-    <div>
-      <div class="eyebrow">&#9670; BMSI &middot; LEAD GENERATION ENGINE</div>
-      <h1>BIM Data Execution</h1>
-      <p class="sub">Upload a spreadsheet. For each company we find <b>every contact in the BMSI hierarchy</b> - name, title, email, phone and LinkedIn - returned as a clean Excel.</p>
+  </div>
+
+  <!-- Live activity ticker -->
+  <div class="ticker-wrap">
+    <div class="ticker" id="ticker">
+      <span class="ticker-item">Loading activity&hellip;</span>
     </div>
-  </header>
+  </div>
 
   <div id="masterbar">
     <span class="dot"></span>
@@ -900,17 +987,17 @@ PAGE = r"""<!doctype html>
         <div class="fld">
           <label for="limit">Candidates to rank</label>
           <input type="number" id="limit" min="1" max="25" value="{{ default_limit }}">
-          <div class="hint">How many people to pull per company (free search). Keep at 25.</div>
+          <div class="hint">Free search size. Keep at 25.</div>
         </div>
         <div class="fld">
           <label for="maxc">Max contacts per company</label>
           <input type="number" id="maxc" min="1" max="15" value="{{ default_maxc }}">
-          <div class="hint">Hierarchy contacts to <b>research</b> per company. <b>~1 credit each.</b></div>
+          <div class="hint">Contacts to <b>research</b>. <b>~1 credit each.</b></div>
         </div>
         <div class="fld">
           <label for="workers">Parallel companies</label>
           <input type="number" id="workers" min="1" max="12" value="6">
-          <div class="hint">Companies processed simultaneously. 6 is safe.</div>
+          <div class="hint">Companies at once. 6 is safe.</div>
         </div>
         <div class="fld">
           <label for="pollint">Poll interval (sec)</label>
@@ -921,7 +1008,7 @@ PAGE = r"""<!doctype html>
       <div class="fld" style="margin-top:2px">
         <label for="pollatt">Max poll attempts</label>
         <input type="number" id="pollatt" min="3" max="60" value="{{ default_attempts }}">
-        <div class="hint">Give up on a company's research after this many checks.</div>
+        <div class="hint">Give up on research after this many checks.</div>
       </div>
       <div style="height:1px;background:var(--line);margin:24px 0"></div>
       <div class="fld">
@@ -933,7 +1020,7 @@ PAGE = r"""<!doctype html>
           <option value="27">Estimators &amp; above</option>
           <option value="8">BIM/VDC/CAD roles only</option>
         </select>
-        <div class="hint">Weaker matches skipped <b>free</b> - no credit spent.</div>
+        <div class="hint">Weaker matches skipped <b>free</b>.</div>
       </div>
       <div class="grid2">
         <div class="fld">
@@ -944,7 +1031,7 @@ PAGE = r"""<!doctype html>
         <div class="fld">
           <label for="maxco">Max companies this run</label>
           <input type="number" id="maxco" min="0" value="0" placeholder="0 = all">
-          <div class="hint">0 = all remaining. Set 100 to cap a batch.</div>
+          <div class="hint">0 = all remaining.</div>
         </div>
       </div>
     </div>
@@ -1079,6 +1166,21 @@ PAGE = r"""<!doctype html>
     if(d && d.contacts != null){
       document.getElementById('masterinfo').innerHTML =
         'Master store: <span style="color:var(--ink-2)">' + d.contacts + '</span> contacts across <span style="color:var(--ink-2)">' + d.companies + '</span> companies (free)';
+      // Build the ticker from actual master data
+      var items = [
+        '<span class="ticker-item"><span class="num">' + d.contacts + '</span> contacts cached</span>',
+        '<span class="ticker-sep">&#9670;</span>',
+        '<span class="ticker-item"><span class="num">' + d.companies + '</span> companies mapped</span>',
+        '<span class="ticker-sep">&#9670;</span>',
+        '<span class="ticker-item">Executive &middot; Estimator &middot; PM &middot; BIM tiers</span>',
+        '<span class="ticker-sep">&#9670;</span>',
+        '<span class="ticker-item">Master synced to Drive</span>',
+        '<span class="ticker-sep">&#9670;</span>',
+        '<span class="ticker-item">Credits reused across future runs</span>',
+        '<span class="ticker-sep">&#9670;</span>'
+      ];
+      // Duplicate for seamless loop
+      document.getElementById('ticker').innerHTML = items.join('') + items.join('');
     }
   }).catch(function(){
     document.getElementById('masterinfo').textContent = 'Master store: empty (builds as you run).';
@@ -1099,7 +1201,7 @@ PAGE = r"""<!doctype html>
       var cls = '';
       if(/ERROR|error|FAILED/.test(l)) cls = 'er';
       else if(/from cache/.test(l)) cls = 'cache';
-      else if(/Finished|complete|ready|NOTHING SPENT|✓/.test(l)) cls = 'ok';
+      else if(/Finished|complete|ready|NOTHING SPENT/.test(l)) cls = 'ok';
       else if(/PREVIEW|Loaded|RUN|Starting|Input file|Output|master/.test(l)) cls = 'dim';
       else if(/\[search\]|\[research\]|\[poll\]|Processing/.test(l)) cls = 'hi';
       return '<div class="' + cls + '">' + l.replace(/</g,'&lt;') + '</div>';
