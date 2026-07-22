@@ -577,12 +577,25 @@ def poll_research(request_ids, headers, interval=None, attempts=None):
     attempts = attempts or POLL_MAX_ATTEMPTS
     params = {"requestIds": ",".join(str(x) for x in request_ids)}
     results = []
-    for _ in range(attempts):
-        data = safe_json(_request("GET", EP_POLL, headers, params=params), "poll")
+    deadline = time.time() + (attempts * interval) + 30   # hard wall-clock limit
+    for attempt in range(1, attempts + 1):
+        if time.time() > deadline:
+            log(f"      [poll] hard deadline reached at attempt {attempt} - skipping company.")
+            break
+        try:
+            data = safe_json(_request("GET", EP_POLL, headers, params=params), "poll")
+        except Exception as e:
+            log(f"      [poll] attempt {attempt}/{attempts}: request error: {e}")
+            time.sleep(interval)
+            continue
         results = data.get("data") or []
-        if isinstance(results, list) and results and all(r.get("status") in DONE_STATUSES for r in results):
+        statuses = [r.get("status") for r in results] if isinstance(results, list) else []
+        log(f"      [poll] attempt {attempt}/{attempts}: statuses={statuses}")
+        if isinstance(results, list) and results and all(s in DONE_STATUSES for s in statuses):
+            log(f"      [poll] complete after {attempt} attempt(s).")
             return results
         time.sleep(interval)
+    log(f"      [poll] gave up after {attempts} attempts - using partial data.")
     return results if isinstance(results, list) else []
 
 
