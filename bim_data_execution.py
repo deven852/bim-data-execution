@@ -207,7 +207,7 @@ AUTH_HEADER_VALUE = "{key}"
 SEARCH_LIMIT              = 25        # candidates to pull & rank per company
 MAX_CONTACTS_PER_COMPANY  = 5         # how many people to RESEARCH per company (credit driver)
 SKIP_DEDUP                = False
-HTTP_TIMEOUT              = 45
+HTTP_TIMEOUT              = int(os.environ.get('HTTP_TIMEOUT', '30'))
 HTTP_RETRIES              = 2         # retry on timeout / transient error
 POLL_INTERVAL_SECONDS     = int(os.environ.get("POLL_INTERVAL_SECONDS", "8"))
 POLL_MAX_ATTEMPTS         = int(os.environ.get("POLL_MAX_ATTEMPTS", "20"))
@@ -560,16 +560,30 @@ def search_candidates(company, headers, limit=None, domain=""):
     limit = limit or SEARCH_LIMIT
     body = {"companyName": company, "companyDomain": _norm_domain(domain) if domain else "",
             "limit": limit}
-    data = safe_json(_request("POST", EP_SEARCH, headers, json=body), "search")
-    return data.get("data") or data.get("contacts") or data.get("results") or []
+    log(f"      [search] {company!r} (domain={domain!r}) - calling Seamless...")
+    try:
+        data = safe_json(_request("POST", EP_SEARCH, headers, json=body), "search")
+        cands = data.get("data") or data.get("contacts") or data.get("results") or []
+        log(f"      [search] {company!r} - got {len(cands)} candidate(s).")
+        return cands
+    except Exception as e:
+        log(f"      [search] {company!r} - FAILED: {e}")
+        raise
 
 def research_ids(search_result_ids, headers):
     body = {"searchResultIds": list(search_result_ids), "skipDeduplicationCheck": SKIP_DEDUP}
-    data = safe_json(_request("POST", EP_RESEARCH, headers, json=body), "research-submit")
+    log(f"      [research] submitting {len(search_result_ids)} id(s) to Seamless...")
+    try:
+        data = safe_json(_request("POST", EP_RESEARCH, headers, json=body), "research-submit")
+    except Exception as e:
+        log(f"      [research] submit FAILED: {e}")
+        raise
     request_ids = data.get("requestIds") or (data.get("data") or {}).get("requestIds") or []
     if not request_ids:
         err = data.get("message") or data.get("error") or json.dumps(data)[:200]
+        log(f"      [research] no requestIds returned. Raw: {err}")
         raise RuntimeError(f"research submit returned no requestIds. Raw: {err}")
+    log(f"      [research] submitted OK, requestIds={request_ids}")
     return request_ids
 
 def poll_research(request_ids, headers, interval=None, attempts=None):
@@ -577,7 +591,7 @@ def poll_research(request_ids, headers, interval=None, attempts=None):
     attempts = attempts or POLL_MAX_ATTEMPTS
     params = {"requestIds": ",".join(str(x) for x in request_ids)}
     results = []
-    deadline = time.time() + (attempts * interval) + 30
+    deadline = time.time() + (attempts * interval) + 30   # hard wall-clock limit
     for attempt in range(1, attempts + 1):
         if time.time() > deadline:
             log(f"      [poll] hard deadline reached at attempt {attempt} - skipping company.")
