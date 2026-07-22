@@ -1,1 +1,7 @@
 get_drive_token.py
+
+__pycache__/
+bim_master.db
+outputs/
+uploads/
+*.pyc
