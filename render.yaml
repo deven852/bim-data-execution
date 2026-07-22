@@ -6,7 +6,7 @@ services:
     runtime: python
     plan: free                      # free instance (sleeps when idle; see DEPLOY.md)
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 8 --timeout 120 --graceful-timeout 30
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 8 --timeout 600 --graceful-timeout 30
     envVars:
       - key: SEAMLESS_API_KEY       # set this in the Render dashboard (secret)
         sync: false
@@ -28,6 +28,10 @@ services:
         sync: false
       - key: AUTO_MAX_COMPANIES     # safety cap on auto-processed files
         value: "50"
+      - key: POLL_INTERVAL_SECONDS  # seconds between Seamless research checks
+        value: "6"
+      - key: POLL_MAX_ATTEMPTS      # give up on a company after this many checks (6s x 12 = 72s max)
+        value: "12"
       - key: DATA_DIR
         value: /var/data            # where uploads/outputs live
       - key: MASTER_DB_PATH
