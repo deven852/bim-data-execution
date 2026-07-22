@@ -150,101 +150,117 @@ def run_job(job_id, input_path, api_key, cfg):
            found=0, nomatch=0, skipped=0, errors=0, contacts=0, preview=preview)
     mode = "PREVIEW (free, no credits)" if preview else "RUN (uses credits)"
 
-    # Pull the PERMANENT master from Drive into the local cache first, so reuse
-    # reflects everything the team has ever researched (survives free-tier resets).
-    if core.drive_enabled() and not preview:
-        pulled = core.sync_master_before_run()
-        if pulled:
-            add_log(f"Loaded {pulled} contacts from the permanent master in Drive.")
-
-    # Save the uploaded INPUT to the shared Drive folder (if Drive is configured)
-    if core.drive_enabled():
-        import datetime as _dt
-        stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M")
-        link = core.drive_upload(input_path, drive_name=f"INPUT_{stamp}_{os.path.basename(input_path)}")
-        if link:
-            add_log(f"Input file saved to shared Drive: {link}")
-    add_log(f"{mode}. {len(companies)} companies, up to {cfg['max_contacts']} contacts each, "
-            f"{cfg['workers']} at a time.")
-
     out_path = os.path.join(OUTPUT_DIR, f"{'preview' if preview else 'results'}_{job_id}.xlsx")
     results_by_company = {}
     counters = {"done": 0, "found": 0, "nomatch": 0, "errors": 0, "contacts": 0, "cached": 0}
-
-    def work(item):
-        company, domain = item
-        try:
-            rows, kind = core.process_company(company, headers,
-                                              search_limit=cfg["search_limit"],
-                                              poll_interval=cfg["poll_interval"],
-                                              poll_attempts=cfg["poll_attempts"],
-                                              min_rank=cfg["min_rank"],
-                                              max_contacts=cfg["max_contacts"],
-                                              preview=preview,
-                                              company_domain=domain)
-            return company, rows, kind
-        except Exception as e:
-            return company, [core.note_row(company, f"ERROR: {e}")], "error"
-
-    with ThreadPoolExecutor(max_workers=cfg["workers"]) as ex:
-        futures = {ex.submit(work, item): item[0] for item in companies}
-        for fut in as_completed(futures):
-            company, rows, kind = fut.result()
-            results_by_company[company] = rows
-            counters["done"] += 1
-            if kind == "found":
-                real = [r for r in rows if r.get("First Name") or r.get("Job Title")]
-                counters["found"] += 1; counters["contacts"] += len(real)
-            elif kind == "cached":
-                real = [r for r in rows if r.get("First Name")]
-                counters["found"] += 1; counters["cached"] += len(real)
-            elif kind == "error": counters["errors"] += 1
-            else: counters["nomatch"] += 1
-            update(current=counters["done"], found=counters["found"],
-                   nomatch=counters["nomatch"], errors=counters["errors"],
-                   contacts=counters["contacts"], cached=counters["cached"], company=company)
-            n = len([r for r in rows if r.get('First Name')])
-            src_tag = ' (from cache - free)' if kind == 'cached' else ''
-            add_log(f"[{counters['done']}/{len(companies)}] {company} - "
-                    f"{n if n else 'no'} contact(s) {'previewed' if preview else 'found'}{src_tag}")
-            # incremental save in input order (companies is list of (name,domain) tuples)
-            ordered = []
-            for c, _ in companies:
-                if c in results_by_company:
-                    ordered.extend(results_by_company[c])
-            try: core.write_xlsx(ordered, out_path)
-            except Exception: pass
-
-    ordered = []
-    for c, _ in companies:
-        ordered.extend(results_by_company.get(c, []))
-    core.write_xlsx(ordered, out_path)
-
-    # Save the OUTPUT to the shared Drive folder (if Drive is configured)
     drive_link = None
-    if core.drive_enabled():
-        import datetime as _dt
-        stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M")
-        tag = "PREVIEW" if preview else "RESULTS"
-        drive_link = core.drive_upload(out_path, drive_name=f"{tag}_{stamp}.xlsx")
-        if drive_link:
-            add_log(f"Output saved to shared Drive: {drive_link}")
 
-    # Push the updated cache back to the PERMANENT master in Drive (accumulates forever)
-    if core.drive_enabled() and not preview:
-        mlink = core.sync_master_after_run()
-        if mlink:
-            add_log(f"Permanent master updated in Drive: {mlink}")
+    try:
+        # Pull the PERMANENT master from Drive into the local cache first, so reuse
+        # reflects everything the team has ever researched (survives free-tier resets).
+        if core.drive_enabled() and not preview:
+            pulled = core.sync_master_before_run()
+            if pulled:
+                add_log(f"Loaded {pulled} contacts from the permanent master in Drive.")
+
+        # Save the uploaded INPUT to the shared Drive folder (if Drive is configured)
+        if core.drive_enabled():
+            import datetime as _dt
+            stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M")
+            link = core.drive_upload(input_path, drive_name=f"INPUT_{stamp}_{os.path.basename(input_path)}")
+            if link:
+                add_log(f"Input file saved to shared Drive: {link}")
+        add_log(f"{mode}. {len(companies)} companies, up to {cfg['max_contacts']} contacts each, "
+                f"{cfg['workers']} at a time.")
+
+        def work(item):
+            company, domain = item
+            try:
+                rows, kind = core.process_company(company, headers,
+                                                  search_limit=cfg["search_limit"],
+                                                  poll_interval=cfg["poll_interval"],
+                                                  poll_attempts=cfg["poll_attempts"],
+                                                  min_rank=cfg["min_rank"],
+                                                  max_contacts=cfg["max_contacts"],
+                                                  preview=preview,
+                                                  company_domain=domain)
+                return company, rows, kind
+            except Exception as e:
+                return company, [core.note_row(company, f"ERROR: {e}")], "error"
+
+        with ThreadPoolExecutor(max_workers=cfg["workers"]) as ex:
+            futures = {ex.submit(work, item): item[0] for item in companies}
+            for fut in as_completed(futures):
+                company, rows, kind = fut.result()
+                results_by_company[company] = rows
+                counters["done"] += 1
+                if kind == "found":
+                    real = [r for r in rows if r.get("First Name") or r.get("Job Title")]
+                    counters["found"] += 1; counters["contacts"] += len(real)
+                elif kind == "cached":
+                    real = [r for r in rows if r.get("First Name")]
+                    counters["found"] += 1; counters["cached"] += len(real)
+                elif kind == "error": counters["errors"] += 1
+                else: counters["nomatch"] += 1
+                update(current=counters["done"], found=counters["found"],
+                       nomatch=counters["nomatch"], errors=counters["errors"],
+                       contacts=counters["contacts"], cached=counters["cached"], company=company)
+                n = len([r for r in rows if r.get('First Name')])
+                src_tag = ' (from cache - free)' if kind == 'cached' else ''
+                add_log(f"[{counters['done']}/{len(companies)}] {company} - "
+                        f"{n if n else 'no'} contact(s) {'previewed' if preview else 'found'}{src_tag}")
+                # incremental save in input order (companies is list of (name,domain) tuples)
+                ordered = []
+                for c, _ in companies:
+                    if c in results_by_company:
+                        ordered.extend(results_by_company[c])
+                try: core.write_xlsx(ordered, out_path)
+                except Exception: pass
+
+        ordered = []
+        for c, _ in companies:
+            ordered.extend(results_by_company.get(c, []))
+        core.write_xlsx(ordered, out_path)
+
+        # Save the OUTPUT to the shared Drive folder (if Drive is configured)
+        if core.drive_enabled():
+            import datetime as _dt
+            stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M")
+            tag = "PREVIEW" if preview else "RESULTS"
+            drive_link = core.drive_upload(out_path, drive_name=f"{tag}_{stamp}.xlsx")
+            if drive_link:
+                add_log(f"Output saved to shared Drive: {drive_link}")
+
+        # Push the updated cache back to the PERMANENT master in Drive (accumulates forever)
+        if core.drive_enabled() and not preview:
+            mlink = core.sync_master_after_run()
+            if mlink:
+                add_log(f"Permanent master updated in Drive: {mlink}")
+
+        if preview:
+            add_log(f"Preview complete. ~{counters['contacts']} contacts would be researched "
+                    f"(est. ~{counters['contacts']} credits) across {counters['found']} companies. "
+                    f"{counters['nomatch']} no match. NOTHING SPENT.")
+        else:
+            add_log(f"Finished. {counters['contacts']} newly researched + {counters['cached']} reused "
+                    f"from cache (saved ~{counters['cached']} credits) across {counters['found']} "
+                    f"companies. {counters['nomatch']} no match, {counters['errors']} errors.")
+
+    except Exception as e:
+        add_log(f"ERROR: Job failed unexpectedly: {e}")
+        update(status="error", error=str(e), company="")
+        return
+
+    finally:
+        # ALWAYS mark the job as done so the browser stops polling.
+        # This runs whether the job succeeded, partially completed, or hit an exception.
+        with JOBS_LOCK:
+            if JOBS[job_id]["status"] == "running":
+                JOBS[job_id]["status"] = "done"
+                JOBS[job_id]["company"] = ""
+                JOBS[job_id]["drive_link"] = drive_link
 
     update(status="done", output=out_path, company="", drive_link=drive_link)
-    if preview:
-        add_log(f"Preview complete. ~{counters['contacts']} contacts would be researched "
-                f"(est. ~{counters['contacts']} credits) across {counters['found']} companies. "
-                f"{counters['nomatch']} no match. NOTHING SPENT.")
-    else:
-        add_log(f"Finished. {counters['contacts']} newly researched + {counters['cached']} reused "
-                f"from cache (saved ~{counters['cached']} credits) across {counters['found']} "
-                f"companies. {counters['nomatch']} no match, {counters['errors']} errors.")
 
 LOGIN_PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>BIM Data Execution - Sign in</title>
