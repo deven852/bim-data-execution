@@ -9,7 +9,7 @@ import uuid
 import threading
 import datetime
 from functools import wraps
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeout
 
 from flask import (Flask, request, jsonify, send_file, redirect, url_for,
                    render_template_string, session, abort)
@@ -42,6 +42,18 @@ def login_required(fn):
 
 JOBS = {}
 JOBS_LOCK = threading.Lock()
+
+def _run_with_timeout(fn, timeout_s, *args, **kwargs):
+    """Run fn in a thread and give up if it takes longer than timeout_s.
+    Returns fn's result, or raises TimeoutError."""
+    with ThreadPoolExecutor(max_workers=1) as _ex:
+        _fut = _ex.submit(fn, *args, **kwargs)
+        try:
+            return _fut.result(timeout=timeout_s)
+        except FuturesTimeout:
+            raise TimeoutError(f"{fn.__name__} exceeded {timeout_s}s")
+
+
 
 # ---- Watched-folder worker ----
 WATCH_LOG = []
@@ -146,10 +158,10 @@ def run_job(job_id, input_path, api_key, cfg):
                 f"up to {cfg['max_contacts']} contacts each, "
                 f"{cfg['workers']} at a time.")
 
-        # Step 2: pull master from Drive (isolated - can't kill the job)
+        # Step 2: pull master from Drive (isolated + timeout - can't hang the job)
         if core.drive_enabled() and not preview:
             try:
-                pulled = core.sync_master_before_run()
+                pulled = _run_with_timeout(core.sync_master_before_run, 20)
                 if pulled:
                     add_log(f"Loaded {pulled} contacts from permanent master in Drive.")
                 else:
@@ -157,13 +169,12 @@ def run_job(job_id, input_path, api_key, cfg):
             except Exception as de:
                 add_log(f"Drive master sync skipped (continuing without it): {de}")
 
-        # Step 3: save input to Drive (isolated)
+        # Step 3: save input to Drive (isolated + timeout)
         if core.drive_enabled():
             try:
                 stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
-                link = core.drive_upload(
-                    input_path,
-                    drive_name=f"INPUT_{stamp}_{os.path.basename(input_path)}")
+                drive_name = f"INPUT_{stamp}_{os.path.basename(input_path)}"
+                link = _run_with_timeout(core.drive_upload, 20, input_path, drive_name=drive_name)
                 if link:
                     add_log(f"Input file saved to Drive: {link}")
             except Exception as de:
@@ -190,10 +201,24 @@ def run_job(job_id, input_path, api_key, cfg):
             except Exception as e:
                 return company, [core.note_row(company, f"ERROR: {e}")], "error"
 
+        # 180s hard cap per company - a stuck one can never freeze the job
+        PER_COMPANY_TIMEOUT = int(os.environ.get("PER_COMPANY_TIMEOUT", "180"))
         with ThreadPoolExecutor(max_workers=cfg["workers"]) as ex:
             futures = {ex.submit(work, item): item[0] for item in companies}
-            for fut in as_completed(futures):
-                company, rows, kind = fut.result()
+            for fut in as_completed(futures, timeout=None):
+                company_name = futures[fut]
+                try:
+                    company, rows, kind = fut.result(timeout=PER_COMPANY_TIMEOUT)
+                except FuturesTimeout:
+                    add_log(f"[timeout] {company_name} took over {PER_COMPANY_TIMEOUT}s - skipped.")
+                    company = company_name
+                    rows = [core.note_row(company_name, f"TIMEOUT after {PER_COMPANY_TIMEOUT}s - Seamless did not respond.")]
+                    kind = "error"
+                except Exception as e:
+                    add_log(f"[error] {company_name} failed: {e}")
+                    company = company_name
+                    rows = [core.note_row(company_name, f"ERROR: {e}")]
+                    kind = "error"
                 results_by_company[company] = rows
                 counters["done"] += 1
 
@@ -240,21 +265,21 @@ def run_job(job_id, input_path, api_key, cfg):
             ordered.extend(results_by_company.get(c, []))
         core.write_xlsx(ordered, out_path)
 
-        # Step 6: upload output to Drive (isolated)
+        # Step 6: upload output to Drive (isolated + timeout)
         if core.drive_enabled():
             try:
                 stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
                 tag = "PREVIEW" if preview else "RESULTS"
-                drive_link = core.drive_upload(out_path, drive_name=f"{tag}_{stamp}.xlsx")
+                drive_link = _run_with_timeout(core.drive_upload, 30, out_path, drive_name=f"{tag}_{stamp}.xlsx")
                 if drive_link:
                     add_log(f"Output saved to Drive: {drive_link}")
             except Exception as de:
                 add_log(f"Drive output upload skipped: {de}")
 
-        # Step 7: push master back to Drive (isolated)
+        # Step 7: push master back to Drive (isolated + timeout)
         if core.drive_enabled() and not preview:
             try:
-                mlink = core.sync_master_after_run()
+                mlink = _run_with_timeout(core.sync_master_after_run, 30)
                 if mlink:
                     add_log(f"Permanent master updated in Drive: {mlink}")
             except Exception as de:
