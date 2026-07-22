@@ -1,25 +1,13 @@
 #!/usr/bin/env python3
 """
-BIM Data Execution - web dashboard (v2, with editable API configuration + stats)
-
-A local web page so non-technical users can upload a company file, tune settings,
-and download the contacts file - without touching the command line. Reuses all
-logic (and the hierarchy) from bim_data_execution.py.
-
-SETUP (one time):
-    pip install flask requests openpyxl
-RUN:
-    python app.py
-Then open http://localhost:5000
-
-The API key can be set on the page (Configuration panel), or via the
-SEAMLESS_API_KEY environment variable as a default.
+BIM Data Execution - web dashboard (v4, fully debugged)
 """
 
 import os
 import time
 import uuid
 import threading
+import datetime
 from functools import wraps
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -27,10 +15,9 @@ from flask import (Flask, request, jsonify, send_file, redirect, url_for,
                    render_template_string, session, abort)
 from werkzeug.utils import secure_filename
 
-import bim_data_execution as core   # must sit next to this file
+import bim_data_execution as core
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-# On a host, point these at a persistent disk via DATA_DIR; else use the app folder.
 DATA_DIR = os.environ.get("DATA_DIR", APP_DIR)
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 OUTPUT_DIR = os.path.join(DATA_DIR, "outputs")
@@ -41,7 +28,6 @@ app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 25 * 1024 * 1024
 app.secret_key = os.environ.get("APP_SECRET", "change-me-" + uuid.uuid4().hex)
 
-# Optional shared team password. Set APP_PASSWORD env var to enable the login gate.
 APP_PASSWORD = os.environ.get("APP_PASSWORD", "")
 
 def login_required(fn):
@@ -57,12 +43,12 @@ def login_required(fn):
 JOBS = {}
 JOBS_LOCK = threading.Lock()
 
-# ---- Watched-folder worker (ping-driven + self-healing timer) ----
+# ---- Watched-folder worker ----
 WATCH_LOG = []
 WATCH_LOCK = threading.Lock()
 WATCH_INTERVAL = int(os.environ.get("WATCH_INTERVAL_SECONDS", "60"))
-_SCAN_LOCK = threading.Lock()     # prevents two scans overlapping
-_LAST_SCAN = [0.0]                # timestamp of last scan start
+_SCAN_LOCK = threading.Lock()
+_LAST_SCAN = [0.0]
 _WATCHER_THREAD = [None]
 
 def _watch_log(msg):
@@ -72,13 +58,11 @@ def _watch_log(msg):
     print(msg, flush=True)
 
 def run_scan(reason="timer"):
-    """Do one scan of the Input folder. Guarded so scans never overlap. Safe to call
-    from the timer thread OR from the /ping and /scan-now endpoints."""
     api_key = os.environ.get("SEAMLESS_API_KEY", "")
     if not (core.watch_enabled() and api_key):
         return
     if not _SCAN_LOCK.acquire(blocking=False):
-        return  # a scan is already running; skip
+        return
     try:
         _LAST_SCAN[0] = time.time()
         found = core.scan_input_folder_once(api_key, logfn=_watch_log)
@@ -97,8 +81,6 @@ def _watcher_loop():
         time.sleep(WATCH_INTERVAL)
 
 def ensure_watcher():
-    """Start the timer thread if it isn't alive. Called at boot AND on every /ping,
-    so even if Gunicorn recycles the worker and kills the thread, the next ping revives it."""
     if not (core.watch_enabled() and os.environ.get("SEAMLESS_API_KEY")):
         return
     t = _WATCHER_THREAD[0]
@@ -110,80 +92,100 @@ def ensure_watcher():
 ensure_watcher()
 
 
-def classify(row):
-    note = (row.get("Note") or "")
-    if note.startswith("ERROR"):
-        return "error"
-    if note.startswith("No contact") or note.startswith("No contacts"):
-        return "nomatch"
-    if row.get("First Name") or row.get("Email"):
-        return "found"
-    return "nomatch"
-
-
-def _classify_rows(rows):
-    note = (rows[0].get("Note") or "") if rows else ""
-    if note.startswith("ERROR"): return "error"
-    if note.startswith("No contacts"): return "nocontacts"
-    if note.startswith("No contact matched"): return "nomatch"
-    return "found"
+# =============================================================================
+# JOB RUNNER
+# =============================================================================
 
 def run_job(job_id, input_path, api_key, cfg):
+    """Process a company file. ALWAYS sets status=done or status=error before returning."""
+
     def update(**kw):
-        with JOBS_LOCK: JOBS[job_id].update(kw)
+        with JOBS_LOCK:
+            JOBS[job_id].update(kw)
+
     def add_log(line):
-        with JOBS_LOCK: JOBS[job_id]["log"].append(line)
+        print(f"[job {job_id}] {line}", flush=True)
+        with JOBS_LOCK:
+            JOBS[job_id]["log"].append(line)
 
-    try:
-        headers = core.auth_headers(api_key)
-        all_companies = core.load_companies(input_path)
-    except Exception as e:
-        update(status="error", error=str(e)); return
-
-    start = max(1, cfg["start"])
-    companies = all_companies[start - 1:]
-    if cfg["limit"]:
-        companies = companies[:cfg["limit"]]
-    preview = cfg["preview"]
-
-    update(status="running", total=len(companies), current=0,
-           found=0, nomatch=0, skipped=0, errors=0, contacts=0, preview=preview)
-    mode = "PREVIEW (free, no credits)" if preview else "RUN (uses credits)"
-
-    out_path = os.path.join(OUTPUT_DIR, f"{'preview' if preview else 'results'}_{job_id}.xlsx")
-    results_by_company = {}
-    counters = {"done": 0, "found": 0, "nomatch": 0, "errors": 0, "contacts": 0, "cached": 0}
+    out_path = os.path.join(OUTPUT_DIR, f"{'preview' if cfg['preview'] else 'results'}_{job_id}.xlsx")
     drive_link = None
 
+    # Everything in one big try/finally so the job ALWAYS finishes
     try:
-        # Pull the PERMANENT master from Drive into the local cache first, so reuse
-        # reflects everything the team has ever researched (survives free-tier resets).
-        if core.drive_enabled() and not preview:
-            pulled = core.sync_master_before_run()
-            if pulled:
-                add_log(f"Loaded {pulled} contacts from the permanent master in Drive.")
+        # Step 1: build headers and load company list
+        add_log("Starting job - loading company list...")
+        try:
+            headers = core.auth_headers(api_key)
+            all_companies = core.load_companies(input_path)
+        except Exception as e:
+            add_log(f"ERROR loading file: {e}")
+            update(status="error", error=str(e))
+            return
 
-        # Save the uploaded INPUT to the shared Drive folder (if Drive is configured)
-        if core.drive_enabled():
-            import datetime as _dt
-            stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M")
-            link = core.drive_upload(input_path, drive_name=f"INPUT_{stamp}_{os.path.basename(input_path)}")
-            if link:
-                add_log(f"Input file saved to shared Drive: {link}")
-        add_log(f"{mode}. {len(companies)} companies, up to {cfg['max_contacts']} contacts each, "
+        add_log(f"Loaded {len(all_companies)} companies from file.")
+
+        start = max(1, cfg["start"])
+        companies = all_companies[start - 1:]
+        if cfg["limit"]:
+            companies = companies[:cfg["limit"]]
+        preview = cfg["preview"]
+        mode = "PREVIEW (free, no credits)" if preview else "RUN (uses credits)"
+
+        if not companies:
+            add_log("ERROR: No companies found in the uploaded file. "
+                    "Make sure it has a column named 'Company'.")
+            update(status="error", error="No companies found in file.")
+            return
+
+        update(status="running", total=len(companies), current=0,
+               found=0, nomatch=0, skipped=0, errors=0,
+               contacts=0, cached=0, preview=preview)
+
+        add_log(f"{mode}. {len(companies)} companies, "
+                f"up to {cfg['max_contacts']} contacts each, "
                 f"{cfg['workers']} at a time.")
+
+        # Step 2: pull master from Drive (isolated - can't kill the job)
+        if core.drive_enabled() and not preview:
+            try:
+                pulled = core.sync_master_before_run()
+                if pulled:
+                    add_log(f"Loaded {pulled} contacts from permanent master in Drive.")
+                else:
+                    add_log("Drive master checked - no new contacts to pull.")
+            except Exception as de:
+                add_log(f"Drive master sync skipped (continuing without it): {de}")
+
+        # Step 3: save input to Drive (isolated)
+        if core.drive_enabled():
+            try:
+                stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+                link = core.drive_upload(
+                    input_path,
+                    drive_name=f"INPUT_{stamp}_{os.path.basename(input_path)}")
+                if link:
+                    add_log(f"Input file saved to Drive: {link}")
+            except Exception as de:
+                add_log(f"Drive input upload skipped: {de}")
+
+        # Step 4: process companies in parallel
+        results_by_company = {}
+        counters = {"done": 0, "found": 0, "nomatch": 0,
+                    "errors": 0, "contacts": 0, "cached": 0}
 
         def work(item):
             company, domain = item
             try:
-                rows, kind = core.process_company(company, headers,
-                                                  search_limit=cfg["search_limit"],
-                                                  poll_interval=cfg["poll_interval"],
-                                                  poll_attempts=cfg["poll_attempts"],
-                                                  min_rank=cfg["min_rank"],
-                                                  max_contacts=cfg["max_contacts"],
-                                                  preview=preview,
-                                                  company_domain=domain)
+                rows, kind = core.process_company(
+                    company, headers,
+                    search_limit=cfg["search_limit"],
+                    poll_interval=cfg["poll_interval"],
+                    poll_attempts=cfg["poll_attempts"],
+                    min_rank=cfg["min_rank"],
+                    max_contacts=cfg["max_contacts"],
+                    preview=preview,
+                    company_domain=domain)
                 return company, rows, kind
             except Exception as e:
                 return company, [core.note_row(company, f"ERROR: {e}")], "error"
@@ -194,73 +196,102 @@ def run_job(job_id, input_path, api_key, cfg):
                 company, rows, kind = fut.result()
                 results_by_company[company] = rows
                 counters["done"] += 1
+
                 if kind == "found":
                     real = [r for r in rows if r.get("First Name") or r.get("Job Title")]
-                    counters["found"] += 1; counters["contacts"] += len(real)
+                    counters["found"] += 1
+                    counters["contacts"] += len(real)
                 elif kind == "cached":
                     real = [r for r in rows if r.get("First Name")]
-                    counters["found"] += 1; counters["cached"] += len(real)
-                elif kind == "error": counters["errors"] += 1
-                else: counters["nomatch"] += 1
-                update(current=counters["done"], found=counters["found"],
-                       nomatch=counters["nomatch"], errors=counters["errors"],
-                       contacts=counters["contacts"], cached=counters["cached"], company=company)
-                n = len([r for r in rows if r.get('First Name')])
-                src_tag = ' (from cache - free)' if kind == 'cached' else ''
+                    counters["found"] += 1
+                    counters["cached"] += len(real)
+                elif kind == "error":
+                    counters["errors"] += 1
+                else:
+                    counters["nomatch"] += 1
+
+                update(current=counters["done"],
+                       found=counters["found"],
+                       nomatch=counters["nomatch"],
+                       errors=counters["errors"],
+                       contacts=counters["contacts"],
+                       cached=counters["cached"],
+                       company=company)
+
+                n = len([r for r in rows if r.get("First Name")])
+                src_tag = " (from cache - free)" if kind == "cached" else ""
                 add_log(f"[{counters['done']}/{len(companies)}] {company} - "
-                        f"{n if n else 'no'} contact(s) {'previewed' if preview else 'found'}{src_tag}")
-                # incremental save in input order (companies is list of (name,domain) tuples)
+                        f"{n if n else 'no'} contact(s) "
+                        f"{'previewed' if preview else 'found'}{src_tag}")
+
+                # Incremental save after each company
                 ordered = []
                 for c, _ in companies:
                     if c in results_by_company:
                         ordered.extend(results_by_company[c])
-                try: core.write_xlsx(ordered, out_path)
-                except Exception: pass
+                try:
+                    core.write_xlsx(ordered, out_path)
+                except Exception:
+                    pass
 
+        # Step 5: final ordered write
         ordered = []
         for c, _ in companies:
             ordered.extend(results_by_company.get(c, []))
         core.write_xlsx(ordered, out_path)
 
-        # Save the OUTPUT to the shared Drive folder (if Drive is configured)
+        # Step 6: upload output to Drive (isolated)
         if core.drive_enabled():
-            import datetime as _dt
-            stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M")
-            tag = "PREVIEW" if preview else "RESULTS"
-            drive_link = core.drive_upload(out_path, drive_name=f"{tag}_{stamp}.xlsx")
-            if drive_link:
-                add_log(f"Output saved to shared Drive: {drive_link}")
+            try:
+                stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+                tag = "PREVIEW" if preview else "RESULTS"
+                drive_link = core.drive_upload(out_path, drive_name=f"{tag}_{stamp}.xlsx")
+                if drive_link:
+                    add_log(f"Output saved to Drive: {drive_link}")
+            except Exception as de:
+                add_log(f"Drive output upload skipped: {de}")
 
-        # Push the updated cache back to the PERMANENT master in Drive (accumulates forever)
+        # Step 7: push master back to Drive (isolated)
         if core.drive_enabled() and not preview:
-            mlink = core.sync_master_after_run()
-            if mlink:
-                add_log(f"Permanent master updated in Drive: {mlink}")
+            try:
+                mlink = core.sync_master_after_run()
+                if mlink:
+                    add_log(f"Permanent master updated in Drive: {mlink}")
+            except Exception as de:
+                add_log(f"Drive master push skipped: {de}")
 
+        # Summary
         if preview:
             add_log(f"Preview complete. ~{counters['contacts']} contacts would be researched "
                     f"(est. ~{counters['contacts']} credits) across {counters['found']} companies. "
                     f"{counters['nomatch']} no match. NOTHING SPENT.")
         else:
-            add_log(f"Finished. {counters['contacts']} newly researched + {counters['cached']} reused "
-                    f"from cache (saved ~{counters['cached']} credits) across {counters['found']} "
-                    f"companies. {counters['nomatch']} no match, {counters['errors']} errors.")
+            add_log(f"Finished. {counters['contacts']} newly researched + "
+                    f"{counters['cached']} reused from cache "
+                    f"(saved ~{counters['cached']} credits) across {counters['found']} companies. "
+                    f"{counters['nomatch']} no match, {counters['errors']} errors.")
+
+        update(status="done", output=out_path, company="", drive_link=drive_link)
 
     except Exception as e:
-        add_log(f"ERROR: Job failed unexpectedly: {e}")
+        # Catch any unexpected crash, log it clearly
+        add_log(f"ERROR: Unexpected crash: {e}")
         update(status="error", error=str(e), company="")
-        return
 
     finally:
-        # ALWAYS mark the job as done so the browser stops polling.
-        # This runs whether the job succeeded, partially completed, or hit an exception.
+        # ABSOLUTE SAFETY NET: no matter what happened above,
+        # if status is still "running" force it to "done" so the browser stops polling.
         with JOBS_LOCK:
             if JOBS[job_id]["status"] == "running":
                 JOBS[job_id]["status"] = "done"
                 JOBS[job_id]["company"] = ""
+                JOBS[job_id]["output"] = out_path
                 JOBS[job_id]["drive_link"] = drive_link
 
-    update(status="done", output=out_path, company="", drive_link=drive_link)
+
+# =============================================================================
+# AUTH PAGES
+# =============================================================================
 
 LOGIN_PAGE = """<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>BIM Data Execution - Sign in</title>
@@ -276,6 +307,11 @@ font-size:14px;cursor:pointer}.err{color:#c0392b;font-size:13px;margin-top:10px}
 <button type="submit">Sign in</button>
 {% if error %}<div class="err">{{ error }}</div>{% endif %}</form></body></html>"""
 
+
+# =============================================================================
+# ROUTES
+# =============================================================================
+
 @app.route("/diag")
 @login_required
 def diag():
@@ -286,9 +322,6 @@ def diag():
 
 @app.route("/ping")
 def ping():
-    # public endpoint the free cron pinger hits. Besides keeping the app awake, it
-    # revives the watcher thread if Gunicorn recycled it, and kicks off a scan in the
-    # background - so processing happens even if the long-lived thread died.
     ensure_watcher()
     if core.watch_enabled() and os.environ.get("SEAMLESS_API_KEY"):
         threading.Thread(target=lambda: run_scan(reason="ping"), daemon=True).start()
@@ -307,7 +340,6 @@ def watch_status():
 @app.route("/scan-now", methods=["POST"])
 @login_required
 def scan_now():
-    # manual trigger to process the input folder immediately (doesn't wait for the timer)
     if not (core.watch_enabled() and os.environ.get("SEAMLESS_API_KEY")):
         return jsonify(error="Watcher not configured."), 400
     threading.Thread(target=lambda: run_scan(reason="manual"), daemon=True).start()
@@ -380,9 +412,12 @@ def upload():
     f.save(saved)
 
     with JOBS_LOCK:
-        JOBS[job_id] = {"status": "queued", "total": 0, "current": 0, "company": "",
-                        "found": 0, "nomatch": 0, "skipped": 0, "errors": 0, "contacts": 0, "cached": 0, "preview": False, "drive_link": None,
-                        "log": [], "output": None, "error": None}
+        JOBS[job_id] = {
+            "status": "queued", "total": 0, "current": 0, "company": "",
+            "found": 0, "nomatch": 0, "skipped": 0, "errors": 0,
+            "contacts": 0, "cached": 0, "preview": False,
+            "drive_link": None, "log": [], "output": None, "error": None
+        }
 
     threading.Thread(target=run_job, args=(job_id, saved, api_key, cfg), daemon=True).start()
     return jsonify(job_id=job_id)
@@ -401,10 +436,6 @@ def export_master():
 @app.route("/master-stats")
 @login_required
 def master_stats():
-    # Instant response - just report the local cache count. The scheduled watcher
-    # already keeps the local cache synced with the Drive master, so we don't need
-    # to redo that expensive Drive round trip on every page load (doing so used to
-    # timeout the Gunicorn worker when Google was slow).
     try:
         return jsonify(core.cache_stats())
     except Exception as e:
@@ -418,11 +449,19 @@ def status(job_id):
         if not job:
             return jsonify(error="Unknown job."), 404
         return jsonify({
-            "status": job["status"], "total": job["total"], "current": job["current"],
-            "company": job["company"], "error": job["error"],
-            "found": job["found"], "nomatch": job["nomatch"],
-            "skipped": job["skipped"], "errors": job["errors"], "contacts": job["contacts"], "cached": job["cached"], "preview": job["preview"],
-            "log": job["log"][-250:],
+            "status":   job["status"],
+            "total":    job["total"],
+            "current":  job["current"],
+            "company":  job["company"],
+            "error":    job["error"],
+            "found":    job["found"],
+            "nomatch":  job["nomatch"],
+            "skipped":  job["skipped"],
+            "errors":   job["errors"],
+            "contacts": job["contacts"],
+            "cached":   job["cached"],
+            "preview":  job["preview"],
+            "log":      job["log"][-250:],
             "download": f"/download/{job_id}" if job["status"] == "done" else None,
             "drive_link": job.get("drive_link"),
         })
@@ -438,6 +477,10 @@ def download(job_id):
     return send_file(job["output"], as_attachment=True,
                      download_name=f"contacts_{job_id}.xlsx")
 
+
+# =============================================================================
+# HTML PAGE
+# =============================================================================
 
 PAGE = r"""<!doctype html>
 <html lang="en">
@@ -465,7 +508,6 @@ PAGE = r"""<!doctype html>
     -webkit-font-smoothing:antialiased; min-height:100vh;
   }
   .wrap{max-width:820px;margin:0 auto;padding:44px 22px 90px}
-
   header{display:flex;align-items:center;gap:18px;border-bottom:1px solid var(--line);
     padding-bottom:22px;margin-bottom:30px}
   .mark{flex:0 0 auto}
@@ -476,11 +518,9 @@ PAGE = r"""<!doctype html>
     text-transform:uppercase;color:var(--cyan-d)}
   h1{font-family:"Space Grotesk",sans-serif;font-weight:700;font-size:32px;letter-spacing:-.01em;margin:5px 0 3px}
   .sub{color:var(--muted);font-size:14.5px;max-width:56ch}
-
   .card{background:var(--panel);border:1px solid var(--line);border-radius:3px;
     box-shadow:0 1px 0 rgba(20,26,32,.03),0 10px 30px -24px rgba(20,26,32,.4);margin-bottom:20px}
-  .card-h{display:flex;align-items:center;gap:10px;padding:15px 20px;border-bottom:1px solid var(--line);
-    cursor:default}
+  .card-h{display:flex;align-items:center;gap:10px;padding:15px 20px;border-bottom:1px solid var(--line);cursor:default}
   .card-h .n{font-family:"IBM Plex Mono",monospace;font-size:12px;color:var(--cyan-d);
     border:1px solid var(--line);border-radius:2px;padding:2px 7px}
   .card-h h2{font-family:"Space Grotesk",sans-serif;font-size:15px;font-weight:600;margin:0}
@@ -489,7 +529,6 @@ PAGE = r"""<!doctype html>
   .card-b{padding:20px}
   .collapsible .card-h{cursor:pointer}
   .collapsed .card-b{display:none}
-
   label{display:block;font-family:"IBM Plex Mono",monospace;font-size:11px;letter-spacing:.09em;
     text-transform:uppercase;color:var(--muted);margin-bottom:7px}
   .fld{margin-bottom:18px}
@@ -507,7 +546,6 @@ PAGE = r"""<!doctype html>
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
   .set{background:#f0fbfc;border:1px solid #cfeef2;color:var(--cyan-d);font-size:12px;
     font-family:"IBM Plex Mono",monospace;padding:3px 8px;border-radius:2px}
-
   .drop{border:1.5px dashed var(--line);border-radius:3px;padding:30px 22px;text-align:center;cursor:pointer;
     transition:border-color .15s,background .15s;background:#fafcfd}
   .drop:hover,.drop.hot{border-color:var(--cyan);background:#f0fbfc}
@@ -515,7 +553,6 @@ PAGE = r"""<!doctype html>
   .drop .h2{color:var(--muted);font-size:13px;margin-top:6px}
   .fname{margin-top:12px;font-family:"IBM Plex Mono",monospace;font-size:13px;color:var(--ink)}
   input[type=file]{display:none}
-
   button.run{width:100%;padding:15px;border:0;border-radius:3px;cursor:pointer;background:var(--ink);color:#fff;
     font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:15px;letter-spacing:.01em;transition:background .15s}
   button.run:hover:not(:disabled){background:#000}
@@ -523,14 +560,12 @@ PAGE = r"""<!doctype html>
   button.run.ghost-btn{background:#fff;color:var(--ink);border:1px solid var(--ink)}
   button.run.ghost-btn:hover:not(:disabled){background:#f3f6f9}
   .msg{margin-top:14px;font-size:13.5px;color:var(--err);min-height:1em}
-
   .stats{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:16px}
   .stat{background:var(--panel);border:1px solid var(--line);border-radius:3px;padding:13px 14px}
   .stat .v{font-family:"Space Grotesk",sans-serif;font-weight:700;font-size:26px;line-height:1}
   .stat .k{font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;
     color:var(--muted);margin-top:6px}
   .stat.found .v{color:var(--ok)} .stat.err .v{color:var(--err)} .stat.total .v{color:var(--cyan-d)}
-
   .barwrap{height:9px;background:#dde3ea;border-radius:99px;overflow:hidden}
   .bar{height:100%;width:0;background:linear-gradient(90deg,var(--cyan-d),var(--cyan));transition:width .3s ease}
   .meta{display:flex;justify-content:space-between;margin:10px 0 16px;font-family:"IBM Plex Mono",monospace;
@@ -605,12 +640,12 @@ PAGE = r"""<!doctype html>
         <div class="fld">
           <label for="maxc">Max contacts per company</label>
           <input type="number" id="maxc" min="1" max="15" value="{{ default_maxc }}">
-          <div class="hint">How many hierarchy contacts to <b>research</b> per company. <b>Each one costs ~1 credit.</b> 5 = up to 5 people per company.</div>
+          <div class="hint">How many hierarchy contacts to <b>research</b> per company. <b>Each one costs ~1 credit.</b></div>
         </div>
         <div class="fld">
           <label for="workers">Parallel companies (speed)</label>
           <input type="number" id="workers" min="1" max="12" value="6">
-          <div class="hint">How many companies to process at once. Higher = faster. 6 is a safe default.</div>
+          <div class="hint">How many companies to process at once. 6 is a safe default.</div>
         </div>
         <div class="fld">
           <label for="pollint">Poll interval (sec)</label>
@@ -688,13 +723,11 @@ PAGE = r"""<!doctype html>
 </div>
 
 <script>
-  // collapse config
   const cfgCard=document.getElementById('cfgCard'), cfgChev=document.getElementById('cfgChev');
   document.getElementById('cfgToggle').addEventListener('click',()=>{
     cfgCard.classList.toggle('collapsed');
     cfgChev.textContent = cfgCard.classList.contains('collapsed') ? '[ edit ]' : '[ hide ]';
   });
-  // show/hide key
   const apikeyEl=document.getElementById('apikey'), tk=document.getElementById('toggleKey');
   tk.addEventListener('click',()=>{const p=apikeyEl.type==='password';apikeyEl.type=p?'text':'password';tk.textContent=p?'hide':'show';});
 
@@ -748,7 +781,7 @@ PAGE = r"""<!doctype html>
   const S={done:document.getElementById('s_done'),contacts:document.getElementById('s_contacts'),
            cached:document.getElementById('s_cached'),nomatch:document.getElementById('s_nomatch'),
            err:document.getElementById('s_err')};
-  // show master store size
+
   fetch('/master-stats').then(r=>r.json()).then(d=>{
     if(d && d.contacts!=null){document.getElementById('masterinfo').textContent=
       'Master store: '+d.contacts+' contacts across '+d.companies+' companies (reused free).';}
@@ -756,14 +789,17 @@ PAGE = r"""<!doctype html>
 
   function render(log){
     cons.innerHTML=log.map(l=>{
-      const cls=/ERROR|error/.test(l)?'er':(/Finished|complete|ready|NOTHING SPENT/.test(l)?'ok':(/no contacts|no match|Skipped|PREVIEW|Loaded|RUN|Quality/.test(l)?'dim':''));
+      const cls=/ERROR|error/.test(l)?'er':(/Finished|complete|ready|NOTHING SPENT/.test(l)?'ok':(/no contacts|no match|Skipped|PREVIEW|Loaded|RUN|Quality|Starting|Loaded/.test(l)?'dim':''));
       return '<div class="'+cls+'">'+l.replace(/</g,'&lt;')+'</div>';
     }).join('');
     cons.scrollTop=cons.scrollHeight;
   }
+
   async function poll(jobId){
     try{
-      const r=await fetch('/status/'+jobId); const s=await r.json();
+      const r=await fetch('/status/'+jobId);
+      if(!r.ok){stage.textContent='Job not found - server may have restarted. Please re-upload.';return;}
+      const s=await r.json();
       render(s.log||[]);
       S.done.textContent=s.current||0; S.contacts.textContent=s.contacts||0;
       S.cached.textContent=s.cached||0; S.nomatch.textContent=s.nomatch||0; S.err.textContent=s.errors||0;
@@ -785,7 +821,7 @@ PAGE = r"""<!doctype html>
         doneBox.classList.add('show'); return;
       }
       setTimeout(()=>poll(jobId),2000);
-    }catch(e){stage.textContent='Lost connection to the server. Is it still running?';}
+    }catch(e){stage.textContent='Lost connection. Retrying...';setTimeout(()=>poll(jobId),4000);}
   }
 </script>
 </body>
