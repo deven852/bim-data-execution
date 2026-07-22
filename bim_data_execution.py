@@ -577,7 +577,7 @@ def poll_research(request_ids, headers, interval=None, attempts=None):
     attempts = attempts or POLL_MAX_ATTEMPTS
     params = {"requestIds": ",".join(str(x) for x in request_ids)}
     results = []
-    deadline = time.time() + (attempts * interval) + 30   # hard wall-clock limit
+    deadline = time.time() + (attempts * interval) + 30
     for attempt in range(1, attempts + 1):
         if time.time() > deadline:
             log(f"      [poll] hard deadline reached at attempt {attempt} - skipping company.")
