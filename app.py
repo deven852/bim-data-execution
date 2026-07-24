@@ -186,27 +186,31 @@ def run_job(job_id, input_path, api_key, cfg):
                 f"up to {cfg['max_contacts']} contacts each, "
                 f"{cfg['workers']} at a time.")
 
-        # Step 2: pull master from Drive (isolated + timeout - can't hang the job)
-        if core.drive_enabled() and not preview:
+        # Step 2 & 3: Drive operations (skip ALL if any one fails/times out)
+        drive_healthy = core.drive_enabled()
+        if drive_healthy and not preview:
             try:
-                pulled = _run_with_timeout(core.sync_master_before_run, 20)
+                pulled = _run_with_timeout(core.sync_master_before_run, 15)
                 if pulled:
                     add_log(f"Loaded {pulled} contacts from permanent master in Drive.")
                 else:
                     add_log("Drive master checked - no new contacts to pull.")
             except Exception as de:
-                add_log(f"Drive master sync skipped (continuing without it): {de}")
+                add_log(f"Drive master sync failed - skipping all Drive operations this run: {de}")
+                drive_healthy = False
 
-        # Step 3: save input to Drive (isolated + timeout)
-        if core.drive_enabled():
+        if drive_healthy:
             try:
                 stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
                 drive_name = f"INPUT_{stamp}_{os.path.basename(input_path)}"
-                link = _run_with_timeout(core.drive_upload, 20, input_path, drive_name=drive_name)
+                link = _run_with_timeout(core.drive_upload, 15, input_path, drive_name=drive_name)
                 if link:
                     add_log(f"Input file saved to Drive: {link}")
             except Exception as de:
-                add_log(f"Drive input upload skipped: {de}")
+                add_log(f"Drive input upload failed - skipping remaining Drive ops: {de}")
+                drive_healthy = False
+
+        add_log(f"Starting parallel processing of {len(companies)} companies...")
 
         # Step 4: process companies in parallel
         results_by_company = {}
@@ -231,7 +235,11 @@ def run_job(job_id, input_path, api_key, cfg):
 
         # 180s hard cap per company - a stuck one can never freeze the job
         PER_COMPANY_TIMEOUT = int(os.environ.get("PER_COMPANY_TIMEOUT", "180"))
-        with ThreadPoolExecutor(max_workers=cfg["workers"]) as ex:
+        # NOTE: do NOT use `with ThreadPoolExecutor` - the `with` block waits for
+        # all threads to finish on exit, which deadlocks if any thread is stuck.
+        # We create the executor, use it, then abandon it (workers are daemons).
+        ex = ThreadPoolExecutor(max_workers=cfg["workers"])
+        try:
             futures = {ex.submit(work, item): item[0] for item in companies}
             for fut in as_completed(futures, timeout=None):
                 company_name = futures[fut]
@@ -286,6 +294,9 @@ def run_job(job_id, input_path, api_key, cfg):
                     core.write_xlsx(ordered, out_path)
                 except Exception:
                     pass
+        finally:
+            # Don't wait for stuck workers to finish - shutdown non-blocking
+            ex.shutdown(wait=False)
 
         # Step 5: final ordered write
         ordered = []
@@ -293,21 +304,23 @@ def run_job(job_id, input_path, api_key, cfg):
             ordered.extend(results_by_company.get(c, []))
         core.write_xlsx(ordered, out_path)
 
-        # Step 6: upload output to Drive (isolated + timeout)
-        if core.drive_enabled():
+        # Step 6: upload output to Drive (only if Drive was healthy earlier)
+        if drive_healthy:
             try:
                 stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
                 tag = "PREVIEW" if preview else "RESULTS"
-                drive_link = _run_with_timeout(core.drive_upload, 30, out_path, drive_name=f"{tag}_{stamp}.xlsx")
+                drive_link = _run_with_timeout(core.drive_upload, 20, out_path, drive_name=f"{tag}_{stamp}.xlsx")
                 if drive_link:
                     add_log(f"Output saved to Drive: {drive_link}")
             except Exception as de:
                 add_log(f"Drive output upload skipped: {de}")
+        elif core.drive_enabled():
+            add_log("Skipping Drive output upload - Drive was unhealthy this run.")
 
-        # Step 7: push master back to Drive (isolated + timeout)
-        if core.drive_enabled() and not preview:
+        # Step 7: push master back to Drive (only if Drive was healthy earlier)
+        if drive_healthy and not preview:
             try:
-                mlink = _run_with_timeout(core.sync_master_after_run, 30)
+                mlink = _run_with_timeout(core.sync_master_after_run, 20)
                 if mlink:
                     add_log(f"Permanent master updated in Drive: {mlink}")
             except Exception as de:
