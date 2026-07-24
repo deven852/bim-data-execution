@@ -44,14 +44,30 @@ JOBS = {}
 JOBS_LOCK = threading.Lock()
 
 def _run_with_timeout(fn, timeout_s, *args, **kwargs):
-    """Run fn in a thread and give up if it takes longer than timeout_s.
-    Returns fn's result, or raises TimeoutError."""
-    with ThreadPoolExecutor(max_workers=1) as _ex:
-        _fut = _ex.submit(fn, *args, **kwargs)
+    """Run fn in a daemon thread and give up if it takes longer than timeout_s.
+    Returns fn's result, or raises TimeoutError. Does NOT wait for the stuck
+    thread to finish — abandons it as a daemon so the main flow can continue."""
+    result = [None]
+    error = [None]
+    done_event = threading.Event()
+
+    def _target():
         try:
-            return _fut.result(timeout=timeout_s)
-        except FuturesTimeout:
-            raise TimeoutError(f"{fn.__name__} exceeded {timeout_s}s")
+            result[0] = fn(*args, **kwargs)
+        except Exception as e:
+            error[0] = e
+        finally:
+            done_event.set()
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    finished = done_event.wait(timeout=timeout_s)
+    if not finished:
+        # Abandon the thread as daemon - it dies when process exits
+        raise TimeoutError(f"{fn.__name__} exceeded {timeout_s}s (thread abandoned)")
+    if error[0] is not None:
+        raise error[0]
+    return result[0]
 
 
 
