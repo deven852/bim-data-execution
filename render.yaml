@@ -4,7 +4,7 @@ services:
   - type: web
     name: bim-data-execution
     runtime: python
-    plan: free                      # free instance (sleeps when idle; see DEPLOY.md)
+    plan: starter                   # paid Starter plan: persistent disk + no idle sleep
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 8 --timeout 600 --graceful-timeout 30
     envVars:
@@ -38,5 +38,5 @@ services:
         value: /var/data/bim_master.db
     disk:
       name: bim-data
-      mountPath: /var/data          # persistent disk keeps the master DB (paid tiers only)
+      mountPath: /var/data          # persistent disk keeps the master DB across restarts
       sizeGB: 1

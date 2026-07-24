@@ -137,6 +137,18 @@ def run_job(job_id, input_path, api_key, cfg):
 
         add_log(f"Loaded {len(all_companies)} companies from file.")
 
+        # Enforce 1-200 companies per file (Starter plan safety cap)
+        MIN_COMPANIES = 1
+        MAX_COMPANIES = 200
+        if len(all_companies) < MIN_COMPANIES:
+            add_log(f"ERROR: File must contain at least {MIN_COMPANIES} company.")
+            update(status="error", error=f"File must contain at least {MIN_COMPANIES} company.")
+            return
+        if len(all_companies) > MAX_COMPANIES:
+            add_log(f"ERROR: File contains {len(all_companies)} companies. Maximum is {MAX_COMPANIES} per file.")
+            update(status="error", error=f"File contains {len(all_companies)} companies. Split into batches of {MAX_COMPANIES} max.")
+            return
+
         start = max(1, cfg["start"])
         companies = all_companies[start - 1:]
         if cfg["limit"]:
@@ -1043,7 +1055,7 @@ PAGE = r"""<!doctype html>
     <div class="card-b">
       <div class="drop" id="drop">
         <strong>Choose a file</strong> or drag it here
-        <div class="h2">Excel (.xlsx) or CSV &middot; column named "Company" (optional: Website, Email)</div>
+        <div class="h2">Excel (.xlsx) or CSV &middot; 1-200 companies &middot; columns: <b style="color:var(--olive-3)">Company</b> + optional <b style="color:var(--olive-3)">Website</b> or <b style="color:var(--olive-3)">Email</b> (for exact company matching)</div>
         <div class="fname" id="fname"></div>
       </div>
       <input type="file" id="file" accept=".xlsx,.xlsm,.csv,.tsv">

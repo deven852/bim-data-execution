@@ -64,10 +64,13 @@ def _domain_matches(asked, found):
     if a == b: return True
     return a.endswith("." + b) or b.endswith("." + a)
 
-def _company_matches(asked, found):
+def _company_matches(asked, found, strict=True):
     """Smart, not strict: is the Seamless-reported company 'found' plausibly the same
     as the company we asked for? Returns True for exact match, substring match either
-    way, or a strong token overlap. Blank 'found' -> False."""
+    way, or a strong token overlap. Blank 'found' -> False.
+
+    When strict=False (used when a matching domain has already vouched for the
+    candidate), we relax to any single distinctive shared token or substring."""
     if not found or not asked:
         return False
     a = _norm_company(asked); b = _norm_company(found)
@@ -86,21 +89,21 @@ def _company_matches(asked, found):
         return [t for t in x.split() if len(t) >= 3 and t not in stop]
     at, bt = toks(a), toks(b)
     if not at or not bt:
-        return False
+        # If stripping stop-words empties both sides, fall back to raw normalized
+        # comparison (handles "The Group" vs "The Group Inc" style cases).
+        raw_a = re.sub(r"\s+", " ", a).strip()
+        raw_b = re.sub(r"\s+", " ", b).strip()
+        return raw_a and raw_b and (raw_a == raw_b or raw_a in raw_b or raw_b in raw_a)
     shared = set(at) & set(bt)
     if not shared:
         return False
     # Strong: at least 2 shared distinctive tokens
     if len(shared) >= 2:
         return True
-    # Or: the shared token is the ONLY distinctive token on BOTH sides
-    # (e.g. "GLF Construction" vs "GLF Construction Corp" both reduce to just "GLF"
-    # after stop-words). This case is safe only when the shared token is fairly
-    # long/rare -- otherwise a short acronym like "BCS" would let "BCS Construction
-    # Group" match "BCS Financial Corporation", which is wrong. Require:
-    #  - single-token-on-each-side, AND
-    #  - the shared token is at least 5 chars long (so real acronyms like "GLF",
-    #    "BCS", "AAA", "MTC" fall through unless they also share something else).
+    # Relaxed mode: domain already matched, so any shared distinctive token is enough
+    if not strict:
+        return True
+    # Strict mode: single shared token only OK if it's a long distinctive one
     if len(at) == 1 and len(bt) == 1:
         shared_tok = next(iter(shared))
         if len(shared_tok) >= 5:
@@ -388,6 +391,11 @@ def load_companies(path):
             if name and key not in seen:
                 seen.add(key); companies.append((name, domain))
     if not companies: raise ValueError("Company column found, but no non-empty company names.")
+    # Enforce the 1-200 company cap for this tool
+    MAX_INPUT_COMPANIES = 200
+    if len(companies) > MAX_INPUT_COMPANIES:
+        raise ValueError(f"Too many companies: file has {len(companies)}, max allowed is {MAX_INPUT_COMPANIES}. "
+                         f"Split your file into batches of {MAX_INPUT_COMPANIES} or fewer.")
     return companies
 
 
@@ -640,19 +648,45 @@ def process_company(company, headers, search_limit=None, poll_interval=None,
 
     # --- COMPANY-MATCH FILTER: drop candidates whose Seamless "company" field
     # doesn't plausibly match the company we asked for. Fixes "wrong person for
-    # the company" (e.g. searching Harbor Contracting and getting Harbor Freight).
-    # If a domain was supplied, require BOTH name and domain to match (safest mode).
+    # the company" (e.g. searching BCS Construction Group and getting BCS Financial).
+    #
+    # Matching strategy (in order of trust):
+    #   1. If a domain was supplied AND the candidate's domain matches -> KEEP.
+    #      Domain is the strongest possible signal; relaxed name check as sanity.
+    #   2. If a domain was supplied but candidate has no domain -> fall back to
+    #      strict name match (Seamless often omits domain even for real hits).
+    #   3. No domain supplied -> use strict name match only.
     kept, dropped = [], []
     for c in candidates:
         cand_co = c.get("companyName") or c.get("company") or c.get("companyOriginal") or ""
         cand_dom = c.get("companyDomain") or c.get("domain") or ""
-        name_ok = _company_matches(company, cand_co)
-        dom_ok = (not company_domain) or _domain_matches(company_domain, cand_dom)
-        if name_ok and dom_ok:
+        keep = False
+        reason = ""
+        if company_domain:
+            if cand_dom and _domain_matches(company_domain, cand_dom):
+                # Domain match: relaxed name check as sanity (catches Seamless mixups)
+                if _company_matches(company, cand_co, strict=False) or not cand_co:
+                    keep = True
+                else:
+                    reason = "domain-ok-but-name-mismatch"
+            elif cand_dom:
+                # Candidate has a domain and it doesn't match ours -> definitely wrong
+                reason = "wrong-domain"
+            else:
+                # No candidate domain: fall back to STRICT name match
+                if _company_matches(company, cand_co, strict=True):
+                    keep = True
+                else:
+                    reason = "no-domain-and-name-mismatch"
+        else:
+            # No domain supplied at all: strict name match only
+            if _company_matches(company, cand_co, strict=True):
+                keep = True
+            else:
+                reason = "name-mismatch"
+        if keep:
             kept.append(c)
         else:
-            reason = ("domain" if (name_ok and not dom_ok)
-                      else "name" if (not name_ok and dom_ok) else "name+domain")
             dropped.append((c.get("name") or "?", cand_co, cand_dom, reason))
     if dropped:
         # Log up to 3 examples of what got dropped, so the user can see the filter working
