@@ -462,9 +462,18 @@ def upload():
     if ext not in (".xlsx", ".xlsm", ".csv", ".tsv"):
         return jsonify(error="That file type isn't supported. Upload a .xlsx or .csv."), 400
 
-    api_key = (request.form.get("api_key") or os.environ.get("SEAMLESS_API_KEY") or "").strip()
+    # Prefer the server-side env var (verified working via /test-seamless).
+    # Only fall back to a browser-supplied key if no env var is configured.
+    env_key = (os.environ.get("SEAMLESS_API_KEY") or "").strip()
+    form_key = (request.form.get("api_key") or "").strip()
+    api_key = env_key if env_key else form_key
     if not api_key:
         return jsonify(error="No API key. Enter one in the Configuration panel, or set SEAMLESS_API_KEY."), 400
+    # Sanity check: Seamless keys are ~40-60 chars. A ridiculously long key is
+    # usually a session token that got pasted by mistake and will hang Seamless.
+    if len(api_key) > 100:
+        return jsonify(error=f"API key looks wrong (length {len(api_key)}, expected ~50). "
+                             f"Clear the API key field in Configuration and try again."), 400
 
     cfg = {
         "search_limit":  _int(request.form, "search_limit",  core.SEARCH_LIMIT, 1, 25),
