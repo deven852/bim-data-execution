@@ -176,7 +176,28 @@ def cache_stats():
         try:
             n = conn.execute("SELECT COUNT(*) FROM contacts").fetchone()[0]
             c = conn.execute("SELECT COUNT(DISTINCT company) FROM contacts").fetchone()[0]
-            return {"contacts": n, "companies": c}
+            # Also report how many are "phoneless" so we can see cache health
+            bad = conn.execute("SELECT COUNT(*) FROM contacts WHERE "
+                               "(email IS NULL OR email='') AND "
+                               "(phone IS NULL OR phone='')").fetchone()[0]
+            return {"contacts": n, "companies": c, "phoneless": bad}
+        finally:
+            conn.close()
+
+def cache_purge_phoneless():
+    """Delete all cached contacts that have neither phone nor email.
+    Returns (deleted_count, remaining_count).
+    Companies with ONLY phoneless rows will be re-researched on next run."""
+    with _DB_LOCK:
+        conn = db_connect()
+        try:
+            cur = conn.execute("DELETE FROM contacts WHERE "
+                               "(email IS NULL OR email='') AND "
+                               "(phone IS NULL OR phone='')")
+            deleted = cur.rowcount
+            conn.commit()
+            remaining = conn.execute("SELECT COUNT(*) FROM contacts").fetchone()[0]
+            return deleted, remaining
         finally:
             conn.close()
 
@@ -637,10 +658,23 @@ def process_company(company, headers, search_limit=None, poll_interval=None,
     company_domain = _norm_domain(company_domain) if company_domain else ""
 
     # 0) MASTER STORE: if we already researched this company, reuse it for free.
+    # But only if the cached rows actually contain useful contact data (phone or email).
+    # Otherwise the cache was populated when only search-tier data was available,
+    # and we should re-research to get real phones/emails.
     if use_cache and not preview:
         cached = cache_lookup_company(company)
         if cached:
-            return cached, "cached"
+            # Check if cached rows have at least one row with phone or email
+            has_contact_info = any(
+                (r.get("Email", "").strip() or r.get("Phone Number", "").strip())
+                for r in cached
+            )
+            if has_contact_info:
+                log(f"      [cache] {company}: returning {len(cached)} cached contact(s) (free)")
+                return cached, "cached"
+            else:
+                log(f"      [cache] {company}: cache has {len(cached)} row(s) but no phones/emails - re-researching")
+                # fall through to fresh research
 
     candidates = search_candidates(company, headers, limit=search_limit, domain=company_domain)
     if not candidates:
@@ -735,6 +769,16 @@ def process_company(company, headers, search_limit=None, poll_interval=None,
     if ids:
         req = research_ids(ids, headers)
         results = poll_research(req, headers, interval=poll_interval, attempts=poll_attempts)
+        # Diagnostic: report how many results came back with phones vs emails
+        phone_count = 0; email_count = 0
+        for r in results:
+            if not isinstance(r, dict):
+                continue
+            c = r.get("contact") if isinstance(r.get("contact"), dict) else r
+            if _find_phone(c): phone_count += 1
+            if _find_email(c): email_count += 1
+        log(f"      [research] {company}: got {len(results)} result(s), "
+            f"{phone_count} with phone, {email_count} with email")
         for r in results:
             if not isinstance(r, dict):
                 continue

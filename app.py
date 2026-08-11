@@ -507,6 +507,20 @@ def master_stats():
     except Exception as e:
         return jsonify(error=str(e)), 500
 
+@app.route("/purge-phoneless", methods=["POST", "GET"])
+@login_required
+def purge_phoneless():
+    """One-shot admin action: delete all cached contacts missing phone AND email.
+    Companies whose only cached rows are phoneless will be re-researched on the next run."""
+    try:
+        deleted, remaining = core.cache_purge_phoneless()
+        return jsonify(deleted=deleted, remaining=remaining,
+                       message=f"Removed {deleted} phoneless contact(s). "
+                               f"{remaining} good contact(s) remain in the cache. "
+                               f"Companies with no good cached rows will re-research on next run.")
+    except Exception as e:
+        return jsonify(error=str(e)), 500
+
 @app.route("/status/<job_id>")
 @login_required
 def status(job_id):
