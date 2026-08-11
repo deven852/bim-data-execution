@@ -462,18 +462,17 @@ def upload():
     if ext not in (".xlsx", ".xlsm", ".csv", ".tsv"):
         return jsonify(error="That file type isn't supported. Upload a .xlsx or .csv."), 400
 
-    # Prefer the server-side env var (verified working via /test-seamless).
-    # Only fall back to a browser-supplied key if no env var is configured.
+    # ALWAYS use the server env var. Browser input is ONLY used as fallback
+    # when no env var is configured (for local/dev usage).
+    # This prevents browser-cached junk keys from being used.
     env_key = (os.environ.get("SEAMLESS_API_KEY") or "").strip()
     form_key = (request.form.get("api_key") or "").strip()
     api_key = env_key if env_key else form_key
     if not api_key:
-        return jsonify(error="No API key. Enter one in the Configuration panel, or set SEAMLESS_API_KEY."), 400
-    # Sanity check: Seamless keys are ~40-60 chars. A ridiculously long key is
-    # usually a session token that got pasted by mistake and will hang Seamless.
-    if len(api_key) > 100:
-        return jsonify(error=f"API key looks wrong (length {len(api_key)}, expected ~50). "
-                             f"Clear the API key field in Configuration and try again."), 400
+        return jsonify(error="No API key. Set SEAMLESS_API_KEY in Render environment."), 400
+    if not env_key and len(form_key) > 100:
+        return jsonify(error=f"API key looks wrong (length {len(form_key)}, expected ~50). "
+                             f"Check your Seamless API key."), 400
 
     cfg = {
         "search_limit":  _int(request.form, "search_limit",  core.SEARCH_LIMIT, 1, 25),
@@ -1140,15 +1139,16 @@ PAGE = r"""<!doctype html>
       <span class="chev" id="cfgChev">Hide &darr;</span>
     </div>
     <div class="card-b">
+      {% if not api_key_set %}
       <div class="fld">
         <label for="apikey">Seamless API key</label>
         <div class="keyrow">
-          <input type="password" id="apikey" autocomplete="off"
-            placeholder="{% if api_key_set %}Using server key - leave blank, or paste to override{% else %}Paste your Seamless API key{% endif %}">
+          <input type="password" id="apikey" autocomplete="off" placeholder="Paste your Seamless API key">
           <button type="button" class="ghost" id="toggleKey">show</button>
         </div>
-        <div class="hint">Sent in the <b>token</b> header. Not stored - lives only in this browser session.</div>
+        <div class="hint">Only shown because no server key is configured. Set <b>SEAMLESS_API_KEY</b> in Render environment to hide this.</div>
       </div>
+      {% endif %}
       <div class="grid2">
         <div class="fld">
           <label for="limit">Candidates to rank</label>
@@ -1258,12 +1258,13 @@ PAGE = r"""<!doctype html>
     cfgCard.classList.toggle('collapsed');
     cfgChev.innerHTML = cfgCard.classList.contains('collapsed') ? 'Edit &rarr;' : 'Hide &darr;';
   });
-  var apikeyEl = document.getElementById('apikey');
+  var apikeyEl = document.getElementById('apikey') || {value:'', type:'password'};
   var tk = document.getElementById('toggleKey');
-  tk.addEventListener('click', function(){
-    var p = apikeyEl.type === 'password';
-    apikeyEl.type = p ? 'text' : 'password';
-    tk.textContent = p ? 'hide' : 'show';
+  if(tk) tk.addEventListener('click', function(){
+    var field = document.getElementById('apikey');
+    if(!field) return;
+    field.type = field.type === 'password' ? 'text' : 'password';
+    tk.textContent = field.type === 'password' ? 'show' : 'hide';
   });
 
   var fileInput = document.getElementById('file'),
@@ -1288,7 +1289,8 @@ PAGE = r"""<!doctype html>
   function collect(previewFlag){
     var fd = new FormData();
     fd.append('file', fileInput.files[0]);
-    if(apikeyEl.value) fd.append('api_key', apikeyEl.value);
+    var apikeyField = document.getElementById('apikey');
+    if(apikeyField && apikeyField.value) fd.append('api_key', apikeyField.value);
     fd.append('search_limit', document.getElementById('limit').value);
     fd.append('max_contacts', document.getElementById('maxc').value);
     fd.append('workers', document.getElementById('workers').value);
