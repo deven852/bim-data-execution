@@ -219,6 +219,7 @@ def run_job(job_id, input_path, api_key, cfg):
 
         def work(item):
             company, domain = item
+            add_log(f"      [worker] START: {company} (domain={domain!r})")
             try:
                 rows, kind = core.process_company(
                     company, headers,
@@ -229,8 +230,10 @@ def run_job(job_id, input_path, api_key, cfg):
                     max_contacts=cfg["max_contacts"],
                     preview=preview,
                     company_domain=domain)
+                add_log(f"      [worker] DONE: {company} -> kind={kind}, rows={len(rows)}")
                 return company, rows, kind
             except Exception as e:
+                add_log(f"      [worker] FAIL: {company} -> {type(e).__name__}: {e}")
                 return company, [core.note_row(company, f"ERROR: {e}")], "error"
 
         # 180s hard cap per company - a stuck one can never freeze the job
@@ -520,6 +523,32 @@ def purge_phoneless():
                                f"Companies with no good cached rows will re-research on next run.")
     except Exception as e:
         return jsonify(error=str(e)), 500
+
+
+@app.route("/test-seamless")
+@login_required
+def test_seamless():
+    """Quick health check: send ONE Seamless search request and report the result.
+    Use this to prove the API key + Seamless connectivity work before running a full job."""
+    import time as _t
+    api_key = os.environ.get("SEAMLESS_API_KEY", "").strip()
+    if not api_key:
+        return jsonify(ok=False, error="SEAMLESS_API_KEY env var is not set on Render."), 500
+    try:
+        headers = core.auth_headers(api_key)
+        t0 = _t.time()
+        cands = core.search_candidates("Microsoft", headers, limit=3)
+        elapsed = _t.time() - t0
+        return jsonify(
+            ok=True,
+            elapsed_seconds=round(elapsed, 2),
+            candidates_returned=len(cands),
+            sample=[{"name": (c.get("name") or ""), "title": c.get("title", "")} for c in cands[:3]],
+            message="Seamless is reachable and returning data."
+        )
+    except Exception as e:
+        return jsonify(ok=False, error=f"{type(e).__name__}: {e}",
+                       message="Seamless call failed. Check API key, credits, or network."), 500
 
 @app.route("/status/<job_id>")
 @login_required

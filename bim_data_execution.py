@@ -231,8 +231,8 @@ AUTH_HEADER_VALUE = "{key}"
 SEARCH_LIMIT              = 25        # candidates to pull & rank per company
 MAX_CONTACTS_PER_COMPANY  = 5         # how many people to RESEARCH per company (credit driver)
 SKIP_DEDUP                = False
-HTTP_TIMEOUT              = int(os.environ.get('HTTP_TIMEOUT', '30'))
-HTTP_RETRIES              = 2         # retry on timeout / transient error
+HTTP_TIMEOUT              = int(os.environ.get('HTTP_TIMEOUT', '20'))   # per HTTP attempt
+HTTP_RETRIES              = int(os.environ.get('HTTP_RETRIES', '1'))    # so max wait per call = 20+2+20 = 42s
 POLL_INTERVAL_SECONDS     = int(os.environ.get("POLL_INTERVAL_SECONDS", "8"))
 POLL_MAX_ATTEMPTS         = int(os.environ.get("POLL_MAX_ATTEMPTS", "20"))
 DELAY_BETWEEN_COMPANIES   = 0
@@ -566,15 +566,20 @@ def note_row(company, note):
 # ---------------------------------------------------------------------------
 def _request(method, url, headers, **kw):
     last = None
-    for attempt in range(1, HTTP_RETRIES + 2):
+    total_attempts = HTTP_RETRIES + 1
+    for attempt in range(1, total_attempts + 1):
         try:
             r = requests.request(method, url, headers=headers, timeout=HTTP_TIMEOUT, **kw)
             if r.status_code >= 500:
                 last = RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
-                time.sleep(2 * attempt); continue
+                if attempt < total_attempts:
+                    time.sleep(2); continue
+                break
             return r
         except (requests.Timeout, requests.ConnectionError) as e:
-            last = e; time.sleep(2 * attempt)
+            last = e
+            if attempt < total_attempts:
+                time.sleep(2)
     raise last
 
 def safe_json(resp, label):
