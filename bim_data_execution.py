@@ -124,9 +124,15 @@ def db_connect():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_company ON contacts(company)")
     return conn
 
-def cache_lookup_company(company):
-    """Return list of saved contact rows for a company (empty if none)."""
-    with _DB_LOCK:
+def cache_lookup_company(company, lock_timeout=3):
+    """Return list of saved contact rows for a company (empty if none).
+    If the DB lock cannot be acquired in `lock_timeout` seconds, we treat this
+    as a cache miss so a stuck DB never freezes a worker."""
+    got_lock = _DB_LOCK.acquire(timeout=lock_timeout)
+    if not got_lock:
+        log(f"      [cache] {company!r}: DB lock timeout - treating as cache miss")
+        return []
+    try:
         conn = db_connect()
         try:
             cur = conn.execute("SELECT company,tier,role,first_name,last_name,job_title,"
@@ -142,11 +148,18 @@ def cache_lookup_company(company):
             return out
         finally:
             conn.close()
+    finally:
+        _DB_LOCK.release()
 
-def cache_save(rows):
-    """Upsert freshly-researched contact rows into the master store."""
+def cache_save(rows, lock_timeout=5):
+    """Upsert freshly-researched contact rows into the master store.
+    Skips silently if the DB lock is unavailable - caller shouldn't be blocked."""
     now = datetime.now(timezone.utc).isoformat()
-    with _DB_LOCK:
+    got_lock = _DB_LOCK.acquire(timeout=lock_timeout)
+    if not got_lock:
+        log(f"      [cache] save skipped - DB lock timeout")
+        return
+    try:
         conn = db_connect()
         try:
             for r in rows:
@@ -169,6 +182,8 @@ def cache_save(rows):
             conn.commit()
         finally:
             conn.close()
+    finally:
+        _DB_LOCK.release()
 
 def cache_stats():
     with _DB_LOCK:
@@ -659,6 +674,7 @@ def process_company(company, headers, search_limit=None, poll_interval=None,
 
     If company_domain is given, it's passed to Seamless search AND each candidate must
     match on BOTH company name and domain (safest 'use website + name together' mode)."""
+    log(f"      [process] {company!r} - entering process_company")
     max_contacts = max_contacts or MAX_CONTACTS_PER_COMPANY
     company_domain = _norm_domain(company_domain) if company_domain else ""
 
