@@ -142,7 +142,9 @@ def run_job(job_id, input_path, api_key, cfg):
     # Everything in one big try/finally so the job ALWAYS finishes
     try:
         # Step 1: build headers and load company list
-        add_log("Starting job - loading company list...")
+        _key_fingerprint = f"{api_key[:4]}...{api_key[-4:]} (len={len(api_key)})" if api_key else "EMPTY"
+        add_log(f"Starting job - API key fingerprint: {_key_fingerprint}")
+        add_log("Loading company list...")
         try:
             headers = core.auth_headers(api_key)
             all_companies = core.load_companies(input_path)

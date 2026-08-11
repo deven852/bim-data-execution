@@ -246,7 +246,7 @@ AUTH_HEADER_VALUE = "{key}"
 SEARCH_LIMIT              = 25        # candidates to pull & rank per company
 MAX_CONTACTS_PER_COMPANY  = 5         # how many people to RESEARCH per company (credit driver)
 SKIP_DEDUP                = False
-HTTP_TIMEOUT              = int(os.environ.get('HTTP_TIMEOUT', '20'))   # per HTTP attempt
+HTTP_TIMEOUT              = int(os.environ.get('HTTP_TIMEOUT', '15'))   # per HTTP attempt - kept low so hangs fail fast
 HTTP_RETRIES              = int(os.environ.get('HTTP_RETRIES', '1'))    # so max wait per call = 20+2+20 = 42s
 POLL_INTERVAL_SECONDS     = int(os.environ.get("POLL_INTERVAL_SECONDS", "8"))
 POLL_MAX_ATTEMPTS         = int(os.environ.get("POLL_MAX_ATTEMPTS", "20"))
@@ -580,11 +580,16 @@ def note_row(company, note):
 # Seamless API (with retry on timeout)
 # ---------------------------------------------------------------------------
 def _request(method, url, headers, **kw):
+    """HTTP call with timeout + retries + logging of every attempt."""
     last = None
     total_attempts = HTTP_RETRIES + 1
     for attempt in range(1, total_attempts + 1):
+        _t0 = time.time()
+        log(f"      [http] {method} {url.split('/')[-1]} attempt {attempt}/{total_attempts} ...")
         try:
             r = requests.request(method, url, headers=headers, timeout=HTTP_TIMEOUT, **kw)
+            _elapsed = time.time() - _t0
+            log(f"      [http] {method} {url.split('/')[-1]} attempt {attempt}: HTTP {r.status_code} in {_elapsed:.1f}s")
             if r.status_code >= 500:
                 last = RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
                 if attempt < total_attempts:
@@ -592,6 +597,8 @@ def _request(method, url, headers, **kw):
                 break
             return r
         except (requests.Timeout, requests.ConnectionError) as e:
+            _elapsed = time.time() - _t0
+            log(f"      [http] {method} {url.split('/')[-1]} attempt {attempt}: FAILED after {_elapsed:.1f}s: {type(e).__name__}: {e}")
             last = e
             if attempt < total_attempts:
                 time.sleep(2)
