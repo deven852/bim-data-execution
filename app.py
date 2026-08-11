@@ -252,6 +252,62 @@ def test_seamless():
     except Exception as e:
         return jsonify(ok=False, error=str(e)), 500
 
+@app.route("/debug-research")
+@login_required
+def debug_research():
+    """Runs a full search + research on ONE company and returns the RAW Seamless
+    responses so we can see exactly what fields Seamless is using for phone/email.
+    Uses ~5 credits."""
+    import time as _t
+    company = request.args.get("company", "Microsoft")
+    api_key = (os.environ.get("SEAMLESS_API_KEY") or "").strip()
+    if not api_key:
+        return jsonify(error="SEAMLESS_API_KEY not set"), 500
+    try:
+        headers = core.auth_headers(api_key)
+        # 1) SEARCH
+        cands = core.search_candidates(company, headers, limit=5)
+        if not cands:
+            return jsonify(step="search", got=0, note="No candidates returned")
+        first = cands[0]
+        # 2) RESEARCH one candidate
+        cid = first.get("searchResultId") or first.get("searchResultID") or first.get("id")
+        if not cid:
+            return jsonify(step="search_returned", candidate_raw=first,
+                           note="No id on candidate to research")
+        req_ids = core.research_ids([cid], headers)
+        # 3) POLL - do our own poll and return the raw response
+        _t.sleep(3)
+        import requests
+        params = {"requestIds": ",".join(str(x) for x in req_ids)}
+        r = requests.get(core.EP_POLL, headers=headers, params=params, timeout=30)
+        raw = r.json()
+        # Try a couple more polls if not done
+        for _ in range(4):
+            done = False
+            data = raw.get("data") or []
+            if data and all(d.get("status") in ("done","error","missing","duplicate")
+                            for d in data):
+                done = True; break
+            _t.sleep(4)
+            r = requests.get(core.EP_POLL, headers=headers, params=params, timeout=30)
+            raw = r.json()
+
+        return jsonify(
+            step="research_complete",
+            search_candidate=first,
+            research_raw=raw,
+            what_we_extract={
+                "email": core._find_email(raw.get("data",[{}])[0] if raw.get("data") else {}),
+                "phone": core._find_phone(raw.get("data",[{}])[0] if raw.get("data") else {}),
+                "linkedin": core._find_linkedin(raw.get("data",[{}])[0] if raw.get("data") else {}),
+            },
+            note="Look at 'research_raw' to see all fields Seamless returned. If email/phone are hiding under a field name we don't check, that's what we need to add."
+        )
+    except Exception as e:
+        return jsonify(step="error", error=str(e)), 500
+
+
 @app.route("/master-stats")
 @login_required
 def master_stats():
