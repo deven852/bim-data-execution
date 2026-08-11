@@ -470,7 +470,7 @@ def upload():
         "poll_attempts": _int(request.form, "poll_attempts", core.POLL_MAX_ATTEMPTS, 3, 60),
         "min_rank":      _int(request.form, "min_rank", 999, 1, 999),
         "max_contacts":  _int(request.form, "max_contacts", core.MAX_CONTACTS_PER_COMPANY, 1, 15),
-        "workers":       _int(request.form, "workers", 6, 1, 12),
+        "workers":       _int(request.form, "workers", 1, 1, 12),
         "start":         _int(request.form, "start", 1, 1, 100000),
         "limit":         _int(request.form, "limit_companies", 0, 0, 100000),
         "preview":       request.form.get("preview") == "1",
@@ -1151,8 +1151,8 @@ PAGE = r"""<!doctype html>
         </div>
         <div class="fld">
           <label for="workers">Parallel companies</label>
-          <input type="number" id="workers" min="1" max="12" value="6">
-          <div class="hint">Companies at once. 6 is safe.</div>
+          <input type="number" id="workers" min="1" max="12" value="1">
+          <div class="hint">Companies at once. <b>1 = safest</b> (Seamless rejects concurrent requests). Raise only if Seamless supports it for your plan.</div>
         </div>
         <div class="fld">
           <label for="pollint">Poll interval (sec)</label>
