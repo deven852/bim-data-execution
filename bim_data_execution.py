@@ -244,7 +244,7 @@ AUTH_HEADER_NAME  = "token"
 AUTH_HEADER_VALUE = "{key}"
 
 SEARCH_LIMIT              = 25        # candidates to pull & rank per company (free)
-MAX_CONTACTS_PER_COMPANY  = 3         # how many people to RESEARCH per company (each = ~1 credit)
+MAX_CONTACTS_PER_COMPANY  = 5         # how many people to RESEARCH per company (each = ~1 credit)
 SKIP_DEDUP                = False
 HTTP_TIMEOUT              = int(os.environ.get('HTTP_TIMEOUT', '15'))   # per HTTP attempt - kept low so hangs fail fast
 HTTP_RETRIES              = int(os.environ.get('HTTP_RETRIES', '1'))    # so max wait per call = 20+2+20 = 42s
@@ -685,24 +685,22 @@ def process_company(company, headers, search_limit=None, poll_interval=None,
     max_contacts = max_contacts or MAX_CONTACTS_PER_COMPANY
     company_domain = _norm_domain(company_domain) if company_domain else ""
 
-    # 0) MASTER STORE: if we already researched this company, reuse it for free.
-    # But only if the cached rows actually contain useful contact data (phone or email).
-    # Otherwise the cache was populated when only search-tier data was available,
-    # and we should re-research to get real phones/emails.
+    # 0) MASTER STORE: if we already researched this company, reuse it for FREE - forever.
+    # Aggressive caching: once a company has real contacts cached, we never pay to
+    # research it again. This is the main credit saver.
     if use_cache and not preview:
         cached = cache_lookup_company(company)
         if cached:
-            # Check if cached rows have at least one row with phone or email
-            has_contact_info = any(
-                (r.get("Email", "").strip() or r.get("Phone Number", "").strip())
-                for r in cached
-            )
-            if has_contact_info:
-                log(f"      [cache] {company}: returning {len(cached)} cached contact(s) (free)")
+            # Reuse as long as there's at least one real person (has a name).
+            # This avoids re-charging for companies we've already researched, while
+            # still allowing pure "no match" placeholders to be retried later.
+            has_real_contact = any((r.get("First Name", "").strip()) for r in cached)
+            if has_real_contact:
+                log(f"      [cache] {company}: returning {len(cached)} cached contact(s) (free, no credits)")
                 return cached, "cached"
             else:
-                log(f"      [cache] {company}: cache has {len(cached)} row(s) but no phones/emails - re-researching")
-                # fall through to fresh research
+                log(f"      [cache] {company}: only a no-match placeholder cached - retrying search")
+                # fall through to fresh search (search is free)
 
     candidates = search_candidates(company, headers, limit=search_limit, domain=company_domain)
     if not candidates:
