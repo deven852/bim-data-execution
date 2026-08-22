@@ -243,8 +243,8 @@ EP_POLL     = f"{SEAMLESS_BASE}/contacts/research/poll"
 AUTH_HEADER_NAME  = "token"
 AUTH_HEADER_VALUE = "{key}"
 
-SEARCH_LIMIT              = 25        # candidates to pull & rank per company
-MAX_CONTACTS_PER_COMPANY  = 5         # how many people to RESEARCH per company (credit driver)
+SEARCH_LIMIT              = 25        # candidates to pull & rank per company (free)
+MAX_CONTACTS_PER_COMPANY  = 3         # how many people to RESEARCH per company (each = ~1 credit)
 SKIP_DEDUP                = False
 HTTP_TIMEOUT              = int(os.environ.get('HTTP_TIMEOUT', '15'))   # per HTTP attempt - kept low so hangs fail fast
 HTTP_RETRIES              = int(os.environ.get('HTTP_RETRIES', '1'))    # so max wait per call = 20+2+20 = 42s

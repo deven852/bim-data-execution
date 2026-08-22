@@ -767,7 +767,7 @@ button.run:disabled{opacity:.3;cursor:not-allowed;}
         <div class="fld">
           <label for="maxc">Max contacts per company</label>
           <input type="number" id="maxc" min="1" max="10" value="{{ default_maxc }}">
-          <div class="hint">How many people to research. <b>~1 Seamless credit each.</b></div>
+          <div class="hint">Researches the <b>top N by hierarchy</b> (President &rarr; Estimator &rarr; BIM). <b>Each = ~1 credit.</b> Lower = cheaper. Default 3.</div>
         </div>
       </div>
       <div class="sep"></div>
