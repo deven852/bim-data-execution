@@ -374,6 +374,53 @@ def log(msg): print(msg, flush=True)
 def auth_headers(api_key):
     return {AUTH_HEADER_NAME: AUTH_HEADER_VALUE.format(key=api_key), "Content-Type": "application/json"}
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Multi-API-key manager
+# Reads keys from SEAMLESS_API_KEYS (comma/space/newline separated) or falls back
+# to SEAMLESS_API_KEY. Rotates to the next key when the current one is exhausted.
+# ──────────────────────────────────────────────────────────────────────────────
+_KEY_LOCK = threading.Lock()
+
+def load_api_keys():
+    """Return a list of API keys from env. Supports SEAMLESS_API_KEYS (multiple,
+    separated by comma/newline/space) and single SEAMLESS_API_KEY."""
+    raw = os.environ.get("SEAMLESS_API_KEYS", "") or ""
+    keys = [k.strip() for k in re.split(r"[,\n\r\s]+", raw) if k.strip()]
+    single = (os.environ.get("SEAMLESS_API_KEY", "") or "").strip()
+    if single and single not in keys:
+        keys.insert(0, single)
+    return keys
+
+class KeyManager:
+    """Holds the pool of keys and hands out the current one. On exhaustion,
+    advance() moves to the next key. Thread-safe."""
+    def __init__(self, keys):
+        self.keys = keys or []
+        self.idx = 0
+    def current(self):
+        with _KEY_LOCK:
+            return self.keys[self.idx] if self.idx < len(self.keys) else None
+    def advance(self, logfn=None):
+        with _KEY_LOCK:
+            old = self.idx
+            self.idx += 1
+            has_more = self.idx < len(self.keys)
+        if logfn:
+            if has_more:
+                logfn(f"      [keys] key #{old+1} exhausted - switching to key #{old+2}")
+            else:
+                logfn(f"      [keys] key #{old+1} exhausted - no more keys available")
+        return self.current()
+    def remaining(self):
+        with _KEY_LOCK:
+            return len(self.keys) - self.idx
+
+def is_credit_error(exc_or_msg):
+    """Heuristic: does this error/message indicate the key is out of credits or unauthorized?"""
+    s = str(exc_or_msg).lower()
+    return any(t in s for t in ("credit", "quota", "limit reached", "insufficient",
+                                "402", "401", "403", "unauthorized", "payment"))
+
 def load_companies(path):
     ext = os.path.splitext(path)[1].lower()
     rows = []
@@ -1109,14 +1156,28 @@ def process_input_file(fmeta, api_key, logfn=None, max_contacts=None):
     # pull permanent master so already-known companies are reused free
     sync_master_before_run()
 
+    # Key manager for rotation when a key runs out of credits
+    _km = KeyManager(load_api_keys() or [api_key])
+    _cur_headers = auth_headers(_km.current())
+
     all_rows, found, cached_n, nomatch = [], 0, 0, 0
     for i, (company, domain) in enumerate(companies, 1):
-        try:
-            rows, kind = process_company(company, headers,
-                                         max_contacts=max_contacts or MAX_CONTACTS_PER_COMPANY,
-                                         company_domain=domain)
-        except Exception as e:
-            rows, kind = [note_row(company, f"ERROR: {e}")], "error"
+        rows, kind = None, None
+        for _attempt in range(len(_km.keys) + 1):
+            try:
+                rows, kind = process_company(company, _cur_headers,
+                                             max_contacts=max_contacts or MAX_CONTACTS_PER_COMPANY,
+                                             company_domain=domain)
+                break
+            except Exception as e:
+                if is_credit_error(e) and _km.remaining() > 1:
+                    nxt = _km.advance(logfn=say)
+                    if nxt:
+                        _cur_headers = auth_headers(nxt)
+                        say(f"[auto] {name}: switching API key, retrying {company}")
+                        continue
+                rows, kind = [note_row(company, f"ERROR: {e}")], "error"
+                break
         all_rows.extend(rows)
         if kind == "cached": cached_n += len([r for r in rows if r.get("First Name")]); found += 1
         elif kind == "found": found += 1

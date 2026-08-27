@@ -1,42 +1,46 @@
 # Render Blueprint for BIM Data Execution
-# One free web service + a persistent disk so the master DB survives restarts.
+# Paid Starter plan: persistent disk + no idle sleep + Drive folder watcher.
 services:
   - type: web
     name: bim-data-execution
     runtime: python
-    plan: starter                   # paid Starter plan: persistent disk + no idle sleep
+    plan: starter
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 8 --timeout 600 --graceful-timeout 30
     envVars:
-      - key: SEAMLESS_API_KEY       # set this in the Render dashboard (secret)
+      - key: SEAMLESS_API_KEY       # primary Seamless key (set in dashboard, secret)
         sync: false
-      - key: APP_PASSWORD           # shared team password (set in dashboard)
+      - key: SEAMLESS_API_KEYS      # OPTIONAL: multiple keys, comma-separated, for auto-rotation
         sync: false
-      - key: APP_SECRET             # random session secret
+      - key: APP_PASSWORD           # shared team password
+        sync: false
+      - key: APP_SECRET
         generateValue: true
-      - key: GDRIVE_CLIENT_ID       # Google Drive: OAuth client id
+      - key: GDRIVE_CLIENT_ID
         sync: false
-      - key: GDRIVE_CLIENT_SECRET   # Google Drive: OAuth client secret
+      - key: GDRIVE_CLIENT_SECRET
         sync: false
-      - key: GDRIVE_REFRESH_TOKEN   # Google Drive: refresh token from get_drive_token.py
+      - key: GDRIVE_REFRESH_TOKEN
         sync: false
-      - key: GDRIVE_FOLDER_ID       # Google Drive: target folder id (results + master)
+      - key: GDRIVE_FOLDER_ID       # where the master DB + manual results are saved
         sync: false
-      - key: GDRIVE_INPUT_FOLDER    # Watched folder: drop files here to auto-process
-        sync: false
-      - key: GDRIVE_OUTPUT_FOLDER   # Watched folder: results appear here
-        sync: false
+      - key: GDRIVE_INPUT_FOLDER    # BIM Input folder - drop files here to auto-process
+        value: "1cHgcr0mp5qqQuPY4t7AEsVxwbTdSQ_91"
+      - key: GDRIVE_OUTPUT_FOLDER   # BIM Output folder - results appear here
+        value: "12dOm91iap2_-E0YqQRLZbKed3B4Ual0e"
+      - key: WATCH_INTERVAL_SECONDS # how often to check BIM Input
+        value: "30"
       - key: AUTO_MAX_COMPANIES     # safety cap on auto-processed files
-        value: "50"
-      - key: POLL_INTERVAL_SECONDS  # seconds between Seamless research checks
+        value: "200"
+      - key: POLL_INTERVAL_SECONDS
         value: "6"
-      - key: POLL_MAX_ATTEMPTS      # give up on a company after this many checks (6s x 12 = 72s max)
+      - key: POLL_MAX_ATTEMPTS
         value: "12"
       - key: DATA_DIR
-        value: /var/data            # where uploads/outputs live
+        value: /var/data
       - key: MASTER_DB_PATH
         value: /var/data/bim_master.db
     disk:
       name: bim-data
-      mountPath: /var/data          # persistent disk keeps the master DB across restarts
+      mountPath: /var/data
       sizeGB: 1

@@ -141,7 +141,10 @@ def run_job(job_id, input_path, api_key, cfg):
         log(f"Processing {len(companies)} companies 1 at a time "
             f"(up to {cfg['max_contacts']} contacts each)...")
 
-        headers = core.auth_headers(api_key)
+        # Key manager: rotates to next key when one runs out of credits
+        km = core.KeyManager(core.load_api_keys() or [api_key])
+        log(f"Loaded {len(km.keys)} API key(s).")
+        headers = core.auth_headers(km.current())
 
         # ── Drive: try once, skip all Drive if it fails ────────────────────────
         drive_ok = core.drive_enabled()
@@ -161,20 +164,31 @@ def run_job(job_id, input_path, api_key, cfg):
         for company, domain in companies:
             upd(company=company)
             log(f"[{counts['done']+1}/{len(companies)}] {company} ...")
-            try:
-                rows, kind = core.process_company(
-                    company, headers,
-                    search_limit   = cfg["search_limit"],
-                    poll_interval  = cfg["poll_interval"],
-                    poll_attempts  = cfg["poll_attempts"],
-                    min_rank       = cfg["min_rank"],
-                    max_contacts   = cfg["max_contacts"],
-                    preview        = False,
-                    company_domain = domain)
-            except Exception as e:
-                log(f"  ERROR: {e}")
-                rows = [core.note_row(company, f"ERROR: {e}")]
-                kind = "error"
+            rows, kind = None, None
+            # Try current key; if it's a credit/auth error, rotate to next key and retry
+            for _attempt in range(len(km.keys) + 1):
+                try:
+                    rows, kind = core.process_company(
+                        company, headers,
+                        search_limit   = cfg["search_limit"],
+                        poll_interval  = cfg["poll_interval"],
+                        poll_attempts  = cfg["poll_attempts"],
+                        min_rank       = cfg["min_rank"],
+                        max_contacts   = cfg["max_contacts"],
+                        preview        = False,
+                        company_domain = domain)
+                    break
+                except Exception as e:
+                    if core.is_credit_error(e) and km.remaining() > 1:
+                        nxt = km.advance(logfn=log)
+                        if nxt:
+                            headers = core.auth_headers(nxt)
+                            log(f"  Retrying {company} with next API key...")
+                            continue
+                    log(f"  ERROR: {e}")
+                    rows = [core.note_row(company, f"ERROR: {e}")]
+                    kind = "error"
+                    break
 
             results_by_company[company] = rows
             counts["done"] += 1
@@ -381,6 +395,16 @@ def debug_research():
         return jsonify(step="error", error=str(e)), 500
 
 
+@app.route("/keys-status")
+@login_required
+def keys_status():
+    keys = core.load_api_keys()
+    return jsonify(
+        count=len(keys),
+        fingerprints=[f"{k[:4]}...{k[-4:]}" for k in keys],
+        message=f"{len(keys)} API key(s) loaded. Rotation kicks in when a key runs out of credits."
+    )
+
 @app.route("/master-stats")
 @login_required
 def master_stats():
@@ -444,11 +468,12 @@ def upload():
     if ext not in (".xlsx", ".xlsm", ".csv", ".tsv"):
         return jsonify(error="Unsupported file type. Use .xlsx or .csv"), 400
 
-    # ALWAYS prefer the server-side env var — never use a browser-supplied key
-    api_key = (os.environ.get("SEAMLESS_API_KEY") or "").strip()
+    # Use the server-side key pool (SEAMLESS_API_KEYS or SEAMLESS_API_KEY)
+    keys = core.load_api_keys()
+    api_key = keys[0] if keys else ""
     if not api_key:
-        return jsonify(error="SEAMLESS_API_KEY is not set on Render. "
-                             "Add it in Render → Environment."), 400
+        return jsonify(error="No API key configured. Set SEAMLESS_API_KEY (or "
+                             "SEAMLESS_API_KEYS for multiple) in Render → Environment."), 400
 
     cfg = {
         "search_limit":  _int(request.form, "search_limit",  core.SEARCH_LIMIT, 1, 25),
