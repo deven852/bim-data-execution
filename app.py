@@ -49,6 +49,57 @@ def _with_timeout(fn, secs, *args, **kwargs):
     return result[0]
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Google Drive folder watcher
+# Drop a file in BIM Input → results appear in BIM Output ~30s later.
+# ──────────────────────────────────────────────────────────────────────────────
+import time as _time
+WATCH_INTERVAL = int(os.environ.get("WATCH_INTERVAL_SECONDS", "30"))
+WATCH_LOG = []
+WATCH_LOG_LOCK = threading.Lock()
+_SCAN_LOCK = threading.Lock()
+_LAST_SCAN = [0.0]
+_WATCHER_STARTED = [False]
+
+def _watch_log(msg):
+    print(msg, flush=True)
+    with WATCH_LOG_LOCK:
+        WATCH_LOG.append(msg)
+        del WATCH_LOG[:-200]
+
+def _run_scan(reason="timer"):
+    api_key = (os.environ.get("SEAMLESS_API_KEY") or "").strip()
+    if not (core.watch_enabled() and api_key):
+        return
+    if not _SCAN_LOCK.acquire(blocking=False):
+        return  # a scan is already running
+    try:
+        _LAST_SCAN[0] = _time.time()
+        found = core.scan_input_folder_once(api_key, logfn=_watch_log)
+        if not found:
+            _watch_log(f"[auto] checked BIM Input ({reason}) - nothing new.")
+    except Exception as e:
+        _watch_log(f"[auto] scan error ({reason}): {e}")
+    finally:
+        _SCAN_LOCK.release()
+
+def _watcher_loop():
+    _watch_log(f"[auto] Watcher started. Checking BIM Input every {WATCH_INTERVAL}s.")
+    while True:
+        _run_scan("timer")
+        _time.sleep(WATCH_INTERVAL)
+
+def ensure_watcher():
+    """Start the background watcher once, if Drive folders are configured."""
+    if _WATCHER_STARTED[0]:
+        return
+    if core.watch_enabled() and (os.environ.get("SEAMLESS_API_KEY") or "").strip():
+        threading.Thread(target=_watcher_loop, daemon=True).start()
+        _WATCHER_STARTED[0] = True
+
+# Kick the watcher off at import time (gunicorn loads this module once per worker)
+ensure_watcher()
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Job runner
 # ──────────────────────────────────────────────────────────────────────────────
 def run_job(job_id, input_path, api_key, cfg):
@@ -233,7 +284,29 @@ def logout():
 
 @app.route("/ping")
 def ping():
-    return jsonify(ok=True, ts=int(__import__("time").time()))
+    ensure_watcher()
+    if core.watch_enabled() and (os.environ.get("SEAMLESS_API_KEY") or "").strip():
+        threading.Thread(target=lambda: _run_scan("ping"), daemon=True).start()
+    return jsonify(ok=True, watching=core.watch_enabled(),
+                   last_scan=int(_LAST_SCAN[0]), interval=WATCH_INTERVAL,
+                   ts=int(_time.time()))
+
+@app.route("/watch-status")
+@login_required
+def watch_status():
+    ensure_watcher()
+    with WATCH_LOG_LOCK:
+        return jsonify(enabled=core.watch_enabled(), interval=WATCH_INTERVAL,
+                       last_scan=int(_LAST_SCAN[0]), log=WATCH_LOG[-60:])
+
+@app.route("/scan-now", methods=["POST", "GET"])
+@login_required
+def scan_now():
+    if not (core.watch_enabled() and (os.environ.get("SEAMLESS_API_KEY") or "").strip()):
+        return jsonify(error="Watcher not configured. Set GDRIVE_INPUT_FOLDER and "
+                             "GDRIVE_OUTPUT_FOLDER in Render environment."), 400
+    threading.Thread(target=lambda: _run_scan("manual"), daemon=True).start()
+    return jsonify(ok=True, message="Scan triggered. Check BIM Output folder in ~1 minute.")
 
 @app.route("/test-seamless")
 @login_required
